@@ -8,7 +8,7 @@
     "dev:server": "bunx y-websocket",
     "dev:server:cloudflare": "wrangler dev",
     "dev:client": "bun run src/client.tsx",
-    "build:client": "bun build src/client.tsx --compile --outfile dist/pixel-game",
+    "build:client": "bash scripts/build-client.sh",
     "deploy:server:cloudflare": "wrangler deploy",
     "typecheck": "tsc --noEmit"
   },
