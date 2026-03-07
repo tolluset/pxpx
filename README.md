@@ -7,7 +7,7 @@ Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. Th
 - Local-first multiplayer with one websocket server and multiple terminal clients
 - Room routing by explicit room name or GitHub `owner/repo` slug
 - Live cursors, recent paint activity, short-lived paint highlights, and board growth on the south/east frontier
-- GitHub device login for remote sessions, with paint access restricted to verified users on the Cloudflare worker
+- Optional GitHub device login for remote sessions, mainly for identity labels
 - Standalone binary builds and GitHub release packaging
 
 ## Prerequisites
@@ -128,7 +128,7 @@ This creates:
 
 ## GitHub Login
 
-Local `y-websocket` development does not require login to paint. Remote Cloudflare worker sessions can allow guests to connect as viewers while restricting painting to verified GitHub sessions.
+Login is optional for both local and remote sessions. Guests can paint immediately, and logging in mainly affects how your identity is shown to other players.
 
 ```bash
 pxboard login
@@ -169,7 +169,7 @@ pnpm deploy:server:cloudflare
 
 Authenticate Wrangler with either `pnpm exec wrangler login` or `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`.
 
-To enable GitHub login and edit verification on your worker:
+To enable worker-backed GitHub login on your worker:
 
 ```bash
 pnpm exec wrangler secret put GITHUB_CLIENT_ID
@@ -194,7 +194,7 @@ PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
 | `PIXEL_NAME` | Player label override | stored GitHub login or random `player-xxxx` |
 | `PIXEL_GITHUB_CLIENT_ID` | Direct GitHub device-login fallback | none |
 | `GITHUB_CLIENT_ID` | Same fallback, alternate name | none |
-| `GITHUB_SESSION_SECRET` | Worker-side HMAC secret for verified edit sessions | none |
+| `GITHUB_SESSION_SECRET` | Worker-side HMAC secret for signed GitHub sessions | none |
 
 Room selection precedence:
 

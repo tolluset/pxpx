@@ -315,58 +315,11 @@ function normalizeRepoSlug(value: string, source: string) {
   return normalized;
 }
 
-function isTrustedLocalServerUrl(serverUrl: string) {
-  try {
-    const url = new URL(serverUrl);
-    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
-  } catch {
-    return false;
-  }
-}
-
-function hasUsableWorkerAuthToken(session: GithubAuthSession | null) {
-  const authToken = getGithubSessionAuthToken(session);
-
-  if (!authToken) {
-    return false;
-  }
-
-  const expiresAt = typeof session?.workerAuthTokenExpiresAt === "string"
-    ? Date.parse(session.workerAuthTokenExpiresAt)
-    : Number.NaN;
-
-  return Number.isFinite(expiresAt) && expiresAt > Date.now();
-}
-
-function createInitialEditAccessState(session: GithubAuthSession | null, serverUrl: string): EditAccessState {
-  if (!session) {
-    return {
-      resolved: true,
-      canEdit: false,
-      reason: "GitHub login is required to paint. Run `pxboard login`.",
-    };
-  }
-
-  if (isTrustedLocalServerUrl(serverUrl)) {
-    return {
-      resolved: true,
-      canEdit: true,
-      reason: "",
-    };
-  }
-
-  if (!hasUsableWorkerAuthToken(session)) {
-    return {
-      resolved: true,
-      canEdit: false,
-      reason: "Refresh GitHub login with `pxboard login` to unlock painting on this server.",
-    };
-  }
-
+function createInitialEditAccessState(): EditAccessState {
   return {
-    resolved: false,
-    canEdit: false,
-    reason: "Checking GitHub edit access...",
+    resolved: true,
+    canEdit: true,
+    reason: "",
   };
 }
 
@@ -958,7 +911,7 @@ function App() {
   const [isSynced, setIsSynced] = useState(false);
   const [playersOnline, setPlayersOnline] = useState(1);
   const [remotePlayers, setRemotePlayers] = useState<RemotePlayer[]>([]);
-  const [editAccess, setEditAccess] = useState<EditAccessState>(() => createInitialEditAccessState(GITHUB_SESSION, SERVER_URL));
+  const [editAccess, setEditAccess] = useState<EditAccessState>(() => createInitialEditAccessState());
   const [statusMessage, setStatusMessage] = useState(
     `Connecting to ${SERVER_URL} in room ${ROOM_NAME} as ${PLAYER_IDENTITY}...`,
   );
@@ -976,9 +929,9 @@ function App() {
       ? "Edit access: enabled"
       : "Edit access: read-only";
   const editHintText = editAccess.canEdit
-    ? isTrustedLocalServerUrl(SERVER_URL)
-      ? "Local server trusts GitHub login"
-      : "Verified by collaboration server"
+    ? GITHUB_SESSION
+      ? "Login only adds identity"
+      : "Guests can paint"
     : editAccess.reason;
   const remotePlayersByCell: Record<string, RemotePlayer[]> = {};
   const remoteCursorLabels: RemoteCursorLabel[] = [];
@@ -1425,17 +1378,18 @@ function App() {
     ) => {
       const canEdit = decoding.readVarUint(decoder) === 1;
       const reason = decoding.readVarString(decoder).trim();
+      const deniedReason = reason || "Editing is disabled on this server.";
 
       startTransition(() => {
         setEditAccess({
           resolved: true,
           canEdit,
-          reason: canEdit ? "" : reason || "GitHub login is required to paint. Run `pxboard login`.",
+          reason: canEdit ? "" : deniedReason,
         });
       });
 
       if (!canEdit) {
-        setStatusMessage(reason || "GitHub login is required to paint. Run `pxboard login`.");
+        setStatusMessage(deniedReason);
       }
     }) as (typeof provider.messageHandlers)[number];
 

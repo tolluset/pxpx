@@ -21,13 +21,13 @@ Add GitHub login to the terminal client without requiring end users to manage a 
 - Added Worker endpoints:
   - `POST /auth/github/device`
   - `POST /auth/github/poll`
-- Added worker-signed GitHub edit session tokens verified during websocket room joins
-- Connected stored GitHub identity to the runtime player name, edit lock, and presence labels in `src/client.tsx`
+- Added worker-signed GitHub session tokens that can be resolved during websocket room joins
+- Connected stored GitHub identity to the runtime player name and presence labels in `src/client.tsx`
 
 ## Result
 
 - A logged-in user now defaults to their GitHub login as the player name
 - If the player overrides their name, other users see `name (@github)` in presence labels
-- Guests can join as viewers, but only verified GitHub sessions can paint
+- Guests and logged-in users can both paint
 - The TUI shows whether the current session is using a stored GitHub identity or a guest profile
-- Self-hosted Cloudflare deployments can enable login and edit verification by setting `GITHUB_CLIENT_ID` and `GITHUB_SESSION_SECRET` on the Worker
+- Self-hosted Cloudflare deployments can enable worker-backed login by setting `GITHUB_CLIENT_ID` and `GITHUB_SESSION_SECRET` on the Worker

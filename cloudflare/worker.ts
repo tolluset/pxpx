@@ -383,29 +383,19 @@ async function verifyGithubSessionToken(secret: string, token: string): Promise<
 }
 
 function resolveConnectionAccess(request: Request, env: DurableObjectEnv): Promise<AuthorizedConnection> {
+  const token = readString(new URL(request.url).searchParams.get("github_auth"));
   const sessionSecret = readString(env.GITHUB_SESSION_SECRET);
 
-  if (!sessionSecret) {
+  if (!token || !sessionSecret) {
     return Promise.resolve({
-      canEdit: false,
-      deniedReason: "This server is read-only because GitHub edit auth is not configured.",
-    });
-  }
-
-  const token = readString(new URL(request.url).searchParams.get("github_auth"));
-
-  if (!token) {
-    return Promise.resolve({
-      canEdit: false,
-      deniedReason: "GitHub login is required to paint. Run pxboard login.",
+      canEdit: true,
     });
   }
 
   return verifyGithubSessionToken(sessionSecret, token).then((result) => {
     if (!result.ok) {
       return {
-        canEdit: false,
-        deniedReason: result.reason,
+        canEdit: true,
       };
     }
 
