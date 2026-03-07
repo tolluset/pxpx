@@ -1,84 +1,20 @@
 # Pixel Game
 
-OpenTUI, React, and Yjs-based terminal pixel board. The client runs in the terminal, and collaboration sync works through `y-websocket` protocol servers, including the Cloudflare Worker in this repo.
+Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. The client runs in the terminal and can connect either to a local `y-websocket` server or the Cloudflare Worker in this repository.
 
-## Start Here
+## What It Supports
 
-### 1. Install
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tolluset/pxboard/main/install.sh | PIXEL_GAME_REPO=tolluset/pxboard sh
-```
-
-Once `install.sh` ships with `DEFAULT_REPO=tolluset/pxboard`, this becomes:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tolluset/pxboard/main/install.sh | sh
-```
-
-### 2. Run
-
-The default gameplay runtime is local-first:
-
-```bash
-pnpm dev:server
-pnpm dev:client
-```
-
-Without any environment overrides, the client connects to `ws://127.0.0.1:1234` and joins room `pixel-game`.
-
-If you want a remote collaboration server instead of the local default:
-
-```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
-```
-
-### 3. Optional: Sign In With GitHub
-
-```bash
-pxboard login
-pxboard whoami
-```
-
-The default Cloudflare Worker can broker the GitHub device flow, so end users do not need to set a local OAuth client ID.
-
-### From A Repo Checkout
-
-If you cloned this repository and want the same install flow:
-
-```bash
-./install.sh
-```
-
-### Development Only
-
-If you just want to run the local multiplayer workflow from source:
-
-```bash
-pnpm install
-pnpm dev:server
-pnpm dev:client
-```
-
-## What You Can Do
-
-- Run one local `y-websocket` server plus multiple terminal clients with no extra environment setup
-- Run a local `y-websocket` server for development
-- Deploy your own Cloudflare Worker + Durable Object collaboration server
-- Sign in from the terminal with GitHub device login
-- Use `PIXEL_ROOM`, `PIXEL_NAME`, or an explicit `owner/repo` selector when you need a different local session
-- Paint only after GitHub login is verified by the collaboration worker
-- Build the client into a standalone binary for the current platform
-- Track live remote cursors directly on the board
-- See freshly painted cells glow for a short moment
-- Review a live paint activity list on the right side of the TUI
-- Grow the shared canvas by painting the south or east frontier
+- Local-first multiplayer with one websocket server and multiple terminal clients
+- Room routing by explicit room name or GitHub `owner/repo` slug
+- Live cursors, recent paint activity, short-lived paint highlights, and board growth on the south/east frontier
+- GitHub device login for remote sessions, with paint access restricted to verified users on the Cloudflare worker
+- Standalone binary builds and GitHub release packaging
 
 ## Prerequisites
 
-- `pnpm` for dependency management
-- `bun` for running and compiling the terminal client
-- A Cloudflare account if you want to deploy your own collaboration server
+- `pnpm`
+- `bun`
+- A Cloudflare account only if you want to run your own worker
 
 If `pnpm` is not installed yet:
 
@@ -87,160 +23,98 @@ corepack enable
 corepack prepare pnpm@10.13.1 --activate
 ```
 
-## Install
+## Quick Start
+
+Install dependencies:
 
 ```bash
 pnpm install
 ```
 
-To install a checked-out copy into a writable directory on your `PATH`:
+Start the default local collaboration server:
+
+```bash
+pnpm dev:server
+```
+
+In another terminal, start the client:
+
+```bash
+pnpm dev:client
+```
+
+By default the client connects to `ws://127.0.0.1:1234` and joins room `pixel-game`.
+
+Useful local variations:
+
+```bash
+pnpm dev:client -- facebook/react
+PIXEL_NAME=alice pnpm dev:client
+PIXEL_ROOM=design-review pnpm dev:client
+```
+
+Run a second client in another terminal to verify real-time sync.
+
+## Install Options
+
+Run directly from a checkout:
+
+```bash
+pnpm install
+pnpm dev:server
+pnpm dev:client
+```
+
+Install a local binary from this checkout:
 
 ```bash
 ./install.sh
 ```
 
-## User Install
+`install.sh` uses `dist/pxboard` if it already exists, otherwise it builds a local binary from source when the checkout has `pnpm`, `bun`, and dependencies available.
 
-If you publish GitHub release assets, users can install the app without `bun` or `pnpm`:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/tolluset/pxboard/main/install.sh | PIXEL_GAME_REPO=tolluset/pxboard sh
-```
-
-The installer uses a writable directory already in your `PATH` when possible, so `pxboard ...` works immediately after install.
-
-The intended published repository slug is `tolluset/pxboard`. After `install.sh` is published with `DEFAULT_REPO=tolluset/pxboard`, users can omit `PIXEL_GAME_REPO=tolluset/pxboard` and install with:
+Install from GitHub release assets:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/tolluset/pxboard/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | PIXEL_GAME_REPO=<owner>/<repo> sh
 ```
 
-Run it with:
+Release downloads currently require `PIXEL_GAME_REPO` or `--repo` because `install.sh` does not ship with a default repository slug.
 
-```bash
-pxboard facebook/react
-```
+## Common Commands
 
-Route a session by GitHub repository:
+The installed binary is `pxboard`. From a source checkout, the equivalent pattern is `pnpm dev:client -- <args>`.
 
-```bash
-pxboard facebook/react
-```
+| Task | Installed binary | From source |
+| --- | --- | --- |
+| Play the default room | `pxboard` | `pnpm dev:client` |
+| Join a repository room | `pxboard facebook/react` | `pnpm dev:client -- facebook/react` |
+| Join a named room | `pxboard --room design-review` | `pnpm dev:client -- --room design-review` |
+| Override player name | `pxboard --name alice` | `pnpm dev:client -- --name alice` |
+| Start GitHub login | `pxboard login` | `pnpm dev:client -- login` |
+| Show stored identity | `pxboard whoami` | `pnpm dev:client -- whoami` |
+| Clear stored identity | `pxboard logout` | `pnpm dev:client -- logout` |
 
-If you are using your own collaboration server:
-
-```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
-```
-
-## Quick Start
-
-The default developer workflow is one local websocket server plus one or more terminal clients.
-
-```bash
-pnpm dev:server
-```
-
-In another terminal:
-
-```bash
-pnpm dev:client
-```
-
-With no environment overrides, `pnpm dev:client` connects to `ws://127.0.0.1:1234` and joins room `pixel-game`.
-
-Run the client again in a second terminal to verify shared-room sync:
-
-```bash
-pnpm dev:client
-```
-
-If the websocket server is unavailable, the terminal UI stays up and shows `Connecting` or `Reconnecting` status in the sidebar and footer instead of failing silently.
-
-Join a repository room from source:
-
-```bash
-pnpm dev:client -- facebook/react
-```
-
-Run the same command in multiple terminals to verify real-time sync. If you want a fixed player name:
-
-```bash
-PIXEL_NAME=alice pnpm dev:client
-```
-
-If you want GitHub identity as your default player name:
-
-```bash
-pnpm dev:client -- login
-pnpm dev:client -- whoami
-```
-
-## Local Development
-
-### 1. Default Local Runtime
-
-```bash
-pnpm dev:server
-```
-
-Then connect the client with the built-in defaults:
-
-```bash
-pnpm dev:client
-```
-
-### 2. Room And Name Overrides
-
-```bash
-PIXEL_ROOM=design-review pnpm dev:client
-PIXEL_NAME=alice pnpm dev:client
-pnpm dev:client -- facebook/react
-```
-
-If you are pointing at a different websocket server:
-
-```bash
-PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
-```
-
-### 3. Local Cloudflare Worker
-
-Run the Worker locally with Wrangler:
-
-```bash
-pnpm dev:server:cloudflare
-```
-
-Then connect the client to the local Worker:
-
-```bash
-PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
-```
-
-## Build A Standalone Binary
-
-Build the client for the current OS and CPU architecture:
+Other project scripts:
 
 ```bash
 pnpm build:client
+pnpm package:client:release
+pnpm dev:server:cloudflare
+pnpm deploy:server:cloudflare
+pnpm typecheck
 ```
 
-Run the compiled binary:
+## Build And Package
+
+Build a standalone binary for the current OS and architecture:
 
 ```bash
+pnpm build:client
 ./dist/pxboard facebook/react
 ```
 
-You can still override the collaboration server at runtime:
-
-```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> ./dist/pxboard facebook/react
-```
-
-## Publish Release Assets
-
-Package the current platform build as a GitHub release asset:
+Package the current platform binary as a GitHub release asset:
 
 ```bash
 pnpm package:client:release
@@ -248,14 +122,13 @@ pnpm package:client:release
 
 This creates:
 
+- `dist/pxboard`
 - `artifacts/pxboard-<os>-<arch>.tar.gz`
 - `artifacts/pxboard-<os>-<arch>.tar.gz.sha256`
 
-Upload the `.tar.gz` file to the GitHub release for the target tag. The install script expects the asset name format above.
-
 ## GitHub Login
 
-The terminal client supports GitHub device login.
+Local `y-websocket` development does not require login to paint. Remote Cloudflare worker sessions can allow guests to connect as viewers while restricting painting to verified GitHub sessions.
 
 ```bash
 pxboard login
@@ -263,117 +136,87 @@ pxboard whoami
 pxboard logout
 ```
 
-By default, `pxboard login` talks to the default Cloudflare Worker over HTTPS. If you deploy your own worker, point login at it:
+To use your own auth worker:
 
 ```bash
 pxboard login --server-url wss://<your-worker-url>
 PIXEL_AUTH_SERVER_URL=wss://<your-worker-url> pxboard login
 ```
 
-When a stored GitHub session exists, the client uses your GitHub login as the default player name unless you override it with `--name` or `PIXEL_NAME`.
+If the worker login flow is unavailable, `pxboard login` can fall back to GitHub's device flow when `PIXEL_GITHUB_CLIENT_ID` or `GITHUB_CLIENT_ID` is set locally.
 
-Editing is locked to verified GitHub sessions. Guests can still connect and watch the board, but only logged-in users can paint. The terminal UI also shows a live paint log in the right panel.
+## Cloudflare Worker
 
-## Deploy Your Own Cloudflare Server
+This repository includes a Durable Object-backed Yjs collaboration worker in `cloudflare/worker.ts`.
 
-This repo includes a Cloudflare Worker with a Durable Object-backed Yjs room server.
+Run the worker locally with Wrangler:
 
-### 1. Authenticate Wrangler
+```bash
+pnpm dev:server:cloudflare
+```
 
-Use one of the following approaches:
+Then point the client at the local worker URL printed by Wrangler. A typical local URL is:
 
-- `pnpm exec wrangler login`
-- Set `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
+```bash
+PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
+```
 
-### 2. Configure GitHub Login And Edit Verification
+Deploy your own worker:
 
-If you want `pxboard login` to use your own Worker and unlock painting for logged-in users, register a GitHub OAuth App and store both secrets in the Worker:
+```bash
+pnpm deploy:server:cloudflare
+```
+
+Authenticate Wrangler with either `pnpm exec wrangler login` or `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`.
+
+To enable GitHub login and edit verification on your worker:
 
 ```bash
 pnpm exec wrangler secret put GITHUB_CLIENT_ID
 pnpm exec wrangler secret put GITHUB_SESSION_SECRET
 ```
 
-### 3. Deploy
-
-```bash
-pnpm deploy:server:cloudflare
-```
-
-Wrangler will print the deployed Worker URL. Use that host as your websocket endpoint.
-
-### 4. Point The Client To Your Deployment
+Then connect clients to the deployed worker:
 
 ```bash
 PIXEL_SERVER_URL=wss://<your-worker-url> pnpm dev:client
+PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
 ```
-
-Or with the compiled binary:
-
-```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> ./dist/pxboard facebook/react
-```
-
-## Repository Rooms
-
-Use a GitHub slug to route everyone working on the same repository into the same room:
-
-```bash
-pxboard facebook/react
-PIXEL_REPO=facebook/react pxboard
-```
-
-The slug is normalized to lowercase and used as the room key. Manual room selection still works:
-
-```bash
-pxboard --room design-review
-PIXEL_ROOM=design-review pxboard
-```
-
-If no room override is provided, the default room is `pixel-game`.
 
 ## Environment Variables
 
-- `PIXEL_SERVER_URL`: websocket gameplay server URL. Default: `ws://127.0.0.1:1234`
-- `PIXEL_AUTH_SERVER_URL`: GitHub login worker URL. Default: `wss://pixel-game-collab.dlqud19.workers.dev`
-- `PIXEL_REPO`: GitHub repository slug used as the room name, for example `facebook/react`
-- `PIXEL_ROOM`: explicit room name override. Default: `pixel-game`
-- `PIXEL_NAME`: player name override. Default: stored GitHub login when available, otherwise random `player-xxxx`
-- `GITHUB_CLIENT_ID`: direct-login fallback for local development when no auth worker is available
-- `GITHUB_SESSION_SECRET`: Worker-only HMAC secret used to verify GitHub edit sessions
-- `CLOUDFLARE_API_TOKEN`: optional token-based Wrangler auth
-- `CLOUDFLARE_ACCOUNT_ID`: required when using token-based Wrangler auth
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `PIXEL_SERVER_URL` | Gameplay websocket server URL | `ws://127.0.0.1:1234` |
+| `PIXEL_AUTH_SERVER_URL` | GitHub login worker URL | `wss://pixel-game-collab.dlqud19.workers.dev` |
+| `PIXEL_ROOM` | Explicit room name | `pixel-game` |
+| `PIXEL_REPO` | Repository slug alias for the room | none |
+| `PIXEL_NAME` | Player label override | stored GitHub login or random `player-xxxx` |
+| `PIXEL_GITHUB_CLIENT_ID` | Direct GitHub device-login fallback | none |
+| `GITHUB_CLIENT_ID` | Same fallback, alternate name | none |
+| `GITHUB_SESSION_SECRET` | Worker-side HMAC secret for verified edit sessions | none |
 
-Runtime precedence:
+Room selection precedence:
 
-- `--room`
-- positional `owner/repo`
-- `--repo`
-- `PIXEL_ROOM`
-- `PIXEL_REPO`
-- default room `pixel-game`
-
-## Commands
-
-- `pnpm dev:client`: run the terminal client
-- `pnpm dev:server`: run the local `y-websocket` server
-- `pnpm dev:server:cloudflare`: run the Cloudflare Worker locally
-- `pxboard login`: start GitHub device login
-- `pxboard whoami`: print the stored GitHub identity
-- `pxboard logout`: clear the stored GitHub identity
-- `pnpm build:client`: build a standalone client binary
-- `pnpm package:client:release`: package the current platform binary for a GitHub release
-- `pnpm deploy:server:cloudflare`: deploy the Cloudflare Worker
-- `pnpm typecheck`: run TypeScript checks
+1. `--room`
+2. Positional `owner/repo`
+3. `--repo`
+4. `PIXEL_ROOM`
+5. `PIXEL_REPO`
+6. `pixel-game`
 
 ## Controls
 
 - `Arrow keys`, `WASD`, or `HJKL`: move the cursor
-- `Enter` or `Space`: paint the current cell
+- `Enter`, `Space`, or left click: paint when editing is allowed
 - `1-8`: select a color
-- Keyboard-only input
-- Other players tint their live cursor cells and show name tags near visible cursors
-- Fresh paint briefly brightens to show recent activity
 - `Esc` or `Q`: quit
 
-Painting the south or east edge, or nudging the cursor one step past that edge, expands the shared board by `8` cells in that direction. When the board outgrows the terminal, the board view follows your cursor instead of requiring the whole canvas to fit on screen.
+Painting or pushing beyond the south or east edge grows the shared board by `8` cells in that direction.
+
+## Related Docs
+
+- [Client distribution notes](docs/2026-03-07-client-distribution.md)
+- [Cloudflare server notes](docs/2026-03-07-cloudflare-server.md)
+- [GitHub login notes](docs/2026-03-07-github-login.md)
+- [Project plan](docs/2026-03-07-pixel-game-plan.md)
