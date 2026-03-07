@@ -30,10 +30,6 @@ type Cursor = {
 };
 
 type PixelSnapshot = Record<string, string>;
-type PositionedBoard = BoxRenderable & {
-  screenX: number;
-  screenY: number;
-};
 
 const BOARD_WIDTH = 16;
 const BOARD_HEIGHT = 16;
@@ -189,6 +185,7 @@ function App() {
   const renderer = useRenderer();
   const terminal = useTerminalDimensions();
   const boardRef = useRef<BoxRenderable | null>(null);
+  const isMousePaintingRef = useRef(false);
   const [doc] = useState(() => new Y.Doc());
   const [provider] = useState(
     () =>
@@ -258,25 +255,20 @@ function App() {
   }
 
   function updateCursorFromMouse(event: MouseEvent, shouldPaint: boolean) {
-    const board = boardRef.current as PositionedBoard | null;
+    const board = boardRef.current;
 
     if (!board) {
       return;
     }
 
-    if (
-      !Number.isFinite(event.x) ||
-      !Number.isFinite(event.y) ||
-      !Number.isFinite(board.screenX) ||
-      !Number.isFinite(board.screenY)
-    ) {
+    if (!Number.isFinite(event.x) || !Number.isFinite(event.y) || !Number.isFinite(board.x) || !Number.isFinite(board.y)) {
       return;
     }
 
-    const relativeX = event.x - board.screenX;
-    const relativeY = event.y - board.screenY;
+    const relativeX = event.x - board.x;
+    const relativeY = event.y - board.y;
     const cellX = Math.floor(relativeX / CELL_WIDTH);
-    const cellY = relativeY;
+    const cellY = Math.floor(relativeY);
 
     if (!isValidCursor({ x: cellX, y: cellY })) {
       return;
@@ -335,6 +327,20 @@ function App() {
   useKeyboard((key) => {
     handleKeyInput(key);
   });
+
+  useEffect(() => {
+    const resetMousePainting = () => {
+      isMousePaintingRef.current = false;
+    };
+
+    renderer.on("blur", resetMousePainting);
+    renderer.on("focus", resetMousePainting);
+
+    return () => {
+      renderer.off("blur", resetMousePainting);
+      renderer.off("focus", resetMousePainting);
+    };
+  }, [renderer]);
 
   useEffect(() => {
     provider.awareness.setLocalStateField("user", {
@@ -485,8 +491,23 @@ function App() {
               width={BOARD_WIDTH * CELL_WIDTH}
               height={BOARD_HEIGHT}
               onMouseMove={(event) => updateCursorFromMouse(event, false)}
-              onMouseDown={(event) => updateCursorFromMouse(event, true)}
-              onMouseDrag={(event) => updateCursorFromMouse(event, true)}
+              onMouseDown={(event) => {
+                isMousePaintingRef.current = event.button === MouseButton.LEFT;
+                updateCursorFromMouse(event, isMousePaintingRef.current);
+              }}
+              onMouseUp={() => {
+                isMousePaintingRef.current = false;
+              }}
+              onMouseDrag={(event) => {
+                if (!isMousePaintingRef.current) {
+                  return;
+                }
+
+                updateCursorFromMouse(event, true);
+              }}
+              onMouseDragEnd={() => {
+                isMousePaintingRef.current = false;
+              }}
             >
               <BoardRows pixels={deferredPixelsSnapshot} cursor={safeCursor} />
             </box>
