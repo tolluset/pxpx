@@ -1,0 +1,11 @@
+name = "pixel-game-collab"
+main = "cloudflare/worker.ts"
+compatibility_date = "2026-03-07"
+
+[[durable_objects.bindings]]
+name = "ROOMS"
+class_name = "PixelRoom"
+
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["PixelRoom"]

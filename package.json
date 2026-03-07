@@ -1,0 +1,32 @@
+{
+  "name": "pixel-game",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@10.13.1",
+  "scripts": {
+    "dev:server": "bunx y-websocket",
+    "dev:server:cloudflare": "wrangler dev",
+    "dev:client": "bun run src/client.tsx",
+    "deploy:server:cloudflare": "wrangler deploy",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@opentui/core": "^0.1.86",
+    "@opentui/react": "^0.1.86",
+    "@y/websocket-server": "^0.1.5",
+    "lib0": "^0.2.117",
+    "react": "^19.2.4",
+    "ws": "^8.19.0",
+    "y-websocket": "^3.0.0",
+    "y-protocols": "^1.0.7",
+    "yjs": "^13.6.29"
+  },
+  "devDependencies": {
+    "@types/node": "^25.3.5",
+    "@types/react": "^19.2.14",
+    "@types/ws": "^8.18.1",
+    "typescript": "^5.9.3",
+    "wrangler": "^4.55.0"
+  }
+}
