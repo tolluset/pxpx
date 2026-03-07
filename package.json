@@ -5,10 +5,11 @@
   "type": "module",
   "packageManager": "pnpm@10.13.1",
   "scripts": {
-    "dev:server": "bunx y-websocket",
+    "dev:server": "HOST=127.0.0.1 PORT=1234 bunx y-websocket",
     "dev:server:cloudflare": "wrangler dev",
     "dev:client": "bun run src/client.tsx",
     "build:client": "bash scripts/build-client.sh",
+    "package:client:release": "bash scripts/package-release.sh",
     "deploy:server:cloudflare": "wrangler deploy",
     "typecheck": "tsc --noEmit"
   },

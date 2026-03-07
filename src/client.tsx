@@ -6,6 +6,7 @@ import {
   type MouseEvent,
 } from "@opentui/core";
 import { createRoot, useKeyboard, useRenderer, useTerminalDimensions } from "@opentui/react";
+import * as decoding from "lib0/decoding";
 import {
   startTransition,
   useDeferredValue,
@@ -16,6 +17,16 @@ import {
 import { WebSocket as WebSocketPolyfill } from "ws";
 import { WebsocketProvider } from "y-websocket";
 import * as Y from "yjs";
+import {
+  beginGithubLogin,
+  clearStoredGithubSession,
+  formatGithubLogin,
+  getAuthServerUrl,
+  getGithubAuthFilePath,
+  getGithubSessionAuthToken,
+  readStoredGithubSession,
+  type GithubAuthSession,
+} from "./github-auth";
 
 type PaletteColor = {
   id: string;
@@ -43,9 +54,27 @@ type BoardViewport = {
 
 type PixelSnapshot = Record<string, string>;
 type RecentPaintSnapshot = Record<string, number>;
+type JsonRecord = Record<string, unknown>;
+
+type PaintLogEntry = {
+  id: string;
+  timestamp: string;
+  x: number;
+  y: number;
+  colorId: string;
+  playerName: string;
+  githubLogin?: string;
+};
+
+type EditAccessState = {
+  resolved: boolean;
+  canEdit: boolean;
+  reason: string;
+};
 
 type AwarenessUser = {
   name?: string;
+  githubLogin?: string;
 };
 
 type AwarenessCursor = {
@@ -67,9 +96,21 @@ type RemotePlayer = {
   cellKey: string;
 };
 
+type RemoteCursorLabel = {
+  key: string;
+  label: string;
+  color: string;
+  left: number;
+  top: number;
+};
+
+type CliCommand = "play" | "login" | "logout" | "whoami";
+
 type CliOptions = {
+  command: CliCommand;
   help: boolean;
   name?: string;
+  positionalRepo?: string;
   repo?: string;
   room?: string;
   serverUrl?: string;
@@ -80,6 +121,7 @@ const INITIAL_BOARD_HEIGHT = 16;
 const BOARD_GROWTH_STEP = 8;
 const CELL_WIDTH = 2;
 const SIDEBAR_WIDTH = 30;
+const ACTIVITY_WIDTH = 34;
 const MIN_VIEWPORT_WIDTH = 6;
 const MIN_VIEWPORT_HEIGHT = 6;
 const EMPTY_CELL_COLOR = "#111827";
@@ -90,7 +132,12 @@ const READY_COLOR = "#22c55e";
 const WARNING_COLOR = "#f59e0b";
 const RECENT_PAINT_WINDOW_MS = 2500;
 const RECENT_PAINT_PRUNE_MS = 250;
-const DEFAULT_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
+const REMOTE_CURSOR_LABEL_WIDTH = 18;
+const MAX_PAINT_LOG_ENTRIES = 200;
+const MAX_VISIBLE_PAINT_LOGS = 10;
+const MESSAGE_ACCESS = 4;
+const DEFAULT_PLAY_SERVER_URL = "ws://127.0.0.1:1234";
+const DEFAULT_AUTH_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
 const DEFAULT_ROOM_NAME = "pixel-game";
 
 function exitWithError(message: string): never {
@@ -100,20 +147,25 @@ function exitWithError(message: string): never {
 }
 
 function printUsage() {
-  console.log(`Usage: pixel-game [options]
+  console.log(`Usage:
+  pxboard [owner/repo] [options]
+  pxboard login [--server-url <url>]
+  pxboard logout
+  pxboard whoami
 
 Options:
-  --repo <owner/repo>   Join the room mapped to a GitHub repository
+  --repo <owner/repo>   Alias for the positional repository selector
   --room <name>         Join a room directly
-  --server-url <url>    Override the websocket server URL
+  --server-url <url>    Override the websocket server URL or auth worker
   --name <player>       Override the player name
   -h, --help            Show this help message
 
 Environment variables:
-  PIXEL_REPO
-  PIXEL_ROOM
-  PIXEL_SERVER_URL
-  PIXEL_NAME
+  PIXEL_SERVER_URL      Websocket server URL for gameplay (default: ws://127.0.0.1:1234)
+  PIXEL_ROOM            Shared room name for collaborators (default: pixel-game)
+  PIXEL_NAME            Local player label (default: GitHub login or player-xxxx)
+  PIXEL_REPO            Repository slug alias for PIXEL_ROOM, for example owner/repo
+  PIXEL_AUTH_SERVER_URL GitHub login worker URL (default: wss://pixel-game-collab.dlqud19.workers.dev)
 `);
 }
 
@@ -129,11 +181,20 @@ function readOptionValue(args: string[], index: number, optionName: string) {
 
 function parseCliOptions(args: string[]) {
   const options: CliOptions = {
+    command: "play",
     help: false,
   };
 
   for (let index = 0; index < args.length; index += 1) {
     const argument = args[index];
+
+    if (
+      index === 0 &&
+      (argument === "login" || argument === "logout" || argument === "whoami")
+    ) {
+      options.command = argument;
+      continue;
+    }
 
     switch (argument) {
       case "--repo":
@@ -157,8 +218,49 @@ function parseCliOptions(args: string[]) {
         options.help = true;
         break;
       default:
-        exitWithError(`unknown argument: ${argument}`);
+        if (argument.startsWith("-")) {
+          exitWithError(`unknown argument: ${argument}`);
+        }
+
+        if (options.command !== "play") {
+          exitWithError(`unexpected argument: ${argument}`);
+        }
+
+        if (options.positionalRepo !== undefined) {
+          exitWithError(`unexpected argument: ${argument}`);
+        }
+
+        options.positionalRepo = argument;
     }
+  }
+
+  if (options.room !== undefined && (options.repo !== undefined || options.positionalRepo !== undefined)) {
+    exitWithError("use either --room or a repository selector, not both");
+  }
+
+  if (options.repo !== undefined && options.positionalRepo !== undefined) {
+    exitWithError("use either --repo or a positional repository argument, not both");
+  }
+
+  if (
+    options.command === "login" &&
+    (options.repo !== undefined ||
+      options.room !== undefined ||
+      options.positionalRepo !== undefined ||
+      options.name !== undefined)
+  ) {
+    exitWithError("login only supports --server-url and --help");
+  }
+
+  if (
+    (options.command === "logout" || options.command === "whoami") &&
+    (options.repo !== undefined ||
+      options.room !== undefined ||
+      options.positionalRepo !== undefined ||
+      options.name !== undefined ||
+      options.serverUrl !== undefined)
+  ) {
+    exitWithError(`${options.command} does not accept board options`);
   }
 
   return options;
@@ -174,6 +276,25 @@ function normalizeRoomName(value: string, source: string) {
   return normalized;
 }
 
+function parseGithubRepoSlug(value: string) {
+  const normalized = value
+    .trim()
+    .replace(/^@/, "")
+    .replace(/^https?:\/\/github\.com\//i, "")
+    .replace(/^ssh:\/\/git@github\.com\//i, "")
+    .replace(/^git@github\.com:/i, "")
+    .replace(/^github\.com\//i, "")
+    .replace(/\.git$/i, "")
+    .replace(/^\/+|\/+$/g, "");
+  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+
+  if (segments.length !== 2) {
+    return null;
+  }
+
+  return `${segments[0].toLowerCase()}/${segments[1].toLowerCase()}`;
+}
+
 function normalizeNonEmptyValue(value: string, source: string) {
   const normalized = value.trim();
 
@@ -185,19 +306,68 @@ function normalizeNonEmptyValue(value: string, source: string) {
 }
 
 function normalizeRepoSlug(value: string, source: string) {
-  const normalized = value
-    .trim()
-    .replace(/^https?:\/\/github\.com\//i, "")
-    .replace(/^github\.com\//i, "")
-    .replace(/\.git$/i, "")
-    .replace(/^\/+|\/+$/g, "");
-  const segments = normalized.split("/").filter((segment) => segment.length > 0);
+  const normalized = parseGithubRepoSlug(value);
 
-  if (segments.length !== 2) {
+  if (!normalized) {
     exitWithError(`${source} must use owner/repo format`);
   }
 
-  return `${segments[0].toLowerCase()}/${segments[1].toLowerCase()}`;
+  return normalized;
+}
+
+function isTrustedLocalServerUrl(serverUrl: string) {
+  try {
+    const url = new URL(serverUrl);
+    return url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "::1";
+  } catch {
+    return false;
+  }
+}
+
+function hasUsableWorkerAuthToken(session: GithubAuthSession | null) {
+  const authToken = getGithubSessionAuthToken(session);
+
+  if (!authToken) {
+    return false;
+  }
+
+  const expiresAt = typeof session?.workerAuthTokenExpiresAt === "string"
+    ? Date.parse(session.workerAuthTokenExpiresAt)
+    : Number.NaN;
+
+  return Number.isFinite(expiresAt) && expiresAt > Date.now();
+}
+
+function createInitialEditAccessState(session: GithubAuthSession | null, serverUrl: string): EditAccessState {
+  if (!session) {
+    return {
+      resolved: true,
+      canEdit: false,
+      reason: "GitHub login is required to paint. Run `pxboard login`.",
+    };
+  }
+
+  if (isTrustedLocalServerUrl(serverUrl)) {
+    return {
+      resolved: true,
+      canEdit: true,
+      reason: "",
+    };
+  }
+
+  if (!hasUsableWorkerAuthToken(session)) {
+    return {
+      resolved: true,
+      canEdit: false,
+      reason: "Refresh GitHub login with `pxboard login` to unlock painting on this server.",
+    };
+  }
+
+  return {
+    resolved: false,
+    canEdit: false,
+    reason: "Checking GitHub edit access...",
+  };
 }
 
 function resolveRuntimeValue(cliValue: string | undefined, envValue: string | undefined) {
@@ -212,23 +382,33 @@ function resolveRuntimeValue(cliValue: string | undefined, envValue: string | un
   return undefined;
 }
 
-function resolveRuntimeConfig() {
-  const cliOptions = parseCliOptions(process.argv.slice(2));
+function formatPlayerIdentity(playerName: string, githubSession: GithubAuthSession | null) {
+  const githubLogin = githubSession?.user.login;
 
-  if (cliOptions.help) {
-    printUsage();
-    process.exit(0);
+  if (!githubLogin) {
+    return playerName;
   }
 
-  const serverUrl = resolveRuntimeValue(cliOptions.serverUrl, process.env.PIXEL_SERVER_URL) ?? DEFAULT_SERVER_URL;
+  if (playerName.toLowerCase() === githubLogin.toLowerCase()) {
+    return `@${githubLogin}`;
+  }
+
+  return `${playerName} (@${githubLogin})`;
+}
+
+function resolvePlayRuntimeConfig(cliOptions: CliOptions) {
+  const githubSession = readStoredGithubSession();
+  const serverUrl = resolveRuntimeValue(cliOptions.serverUrl, process.env.PIXEL_SERVER_URL) ?? DEFAULT_PLAY_SERVER_URL;
   const playerName =
     resolveRuntimeValue(cliOptions.name, process.env.PIXEL_NAME) ??
+    githubSession?.user.login ??
     `player-${Math.random().toString(36).slice(2, 6)}`;
+  const cliRepoSelector = cliOptions.positionalRepo ?? cliOptions.repo;
   const roomName =
     cliOptions.room !== undefined
       ? normalizeRoomName(cliOptions.room, "--room")
-      : cliOptions.repo !== undefined
-        ? normalizeRepoSlug(cliOptions.repo, "--repo")
+      : cliRepoSelector !== undefined
+        ? normalizeRepoSlug(cliRepoSelector, cliOptions.positionalRepo !== undefined ? "owner/repo" : "--repo")
         : process.env.PIXEL_ROOM !== undefined
           ? normalizeRoomName(process.env.PIXEL_ROOM, "PIXEL_ROOM")
           : process.env.PIXEL_REPO !== undefined
@@ -236,6 +416,8 @@ function resolveRuntimeConfig() {
             : DEFAULT_ROOM_NAME;
 
   return {
+    githubSession,
+    identityLabel: formatPlayerIdentity(playerName, githubSession),
     playerName: normalizeNonEmptyValue(playerName, cliOptions.name !== undefined ? "--name" : "PIXEL_NAME"),
     roomName,
     serverUrl: normalizeNonEmptyValue(
@@ -245,9 +427,112 @@ function resolveRuntimeConfig() {
   };
 }
 
-const RUNTIME_CONFIG = resolveRuntimeConfig();
+function getLoginAuthServerUrl(cliOptions: CliOptions) {
+  const serverUrl =
+    resolveRuntimeValue(cliOptions.serverUrl, process.env.PIXEL_AUTH_SERVER_URL) ?? DEFAULT_AUTH_SERVER_URL;
+
+  return getAuthServerUrl(serverUrl);
+}
+
+function getConnectionLabel(connectionStatus: string) {
+  if (connectionStatus === "connected") {
+    return "Connected";
+  }
+
+  if (connectionStatus === "disconnected") {
+    return "Reconnecting";
+  }
+
+  return "Connecting";
+}
+
+async function runGithubLoginCommand(cliOptions: CliOptions) {
+  const existingSession = readStoredGithubSession();
+  const authServerUrl = getLoginAuthServerUrl(cliOptions);
+
+  if (existingSession) {
+    console.log(`Replacing stored GitHub login for @${existingSession.user.login}.`);
+  }
+
+  const pendingLogin = await beginGithubLogin(authServerUrl);
+
+  console.log("GitHub device login");
+  console.log(`1. Open ${pendingLogin.deviceLogin.verificationUri}`);
+
+  if (pendingLogin.deviceLogin.verificationUriComplete) {
+    console.log(`   Direct link: ${pendingLogin.deviceLogin.verificationUriComplete}`);
+  }
+
+  console.log(`2. Enter code ${pendingLogin.deviceLogin.userCode}`);
+  console.log("3. Approve access in the browser");
+  console.log(`Waiting for authorization via ${authServerUrl}...`);
+
+  const session = await pendingLogin.complete;
+
+  console.log(`Logged in as @${session.user.login}`);
+  console.log(`Stored at ${getGithubAuthFilePath()}`);
+}
+
+function runGithubLogoutCommand() {
+  const session = readStoredGithubSession();
+
+  if (!session) {
+    console.log("GitHub login is already cleared.");
+    return;
+  }
+
+  clearStoredGithubSession();
+  console.log(`Logged out @${session.user.login}`);
+}
+
+function runGithubWhoAmICommand() {
+  const session = readStoredGithubSession();
+
+  if (!session) {
+    console.log("GitHub: guest");
+    console.log(`Storage: ${getGithubAuthFilePath()}`);
+    return;
+  }
+
+  console.log(`GitHub: @${session.user.login}`);
+
+  if (session.user.name) {
+    console.log(`Name: ${session.user.name}`);
+  }
+
+  console.log(`Profile: ${session.user.htmlUrl}`);
+  console.log(`Storage: ${getGithubAuthFilePath()}`);
+}
+
+const CLI_OPTIONS = parseCliOptions(process.argv.slice(2));
+
+if (CLI_OPTIONS.help) {
+  printUsage();
+  process.exit(0);
+}
+
+if (CLI_OPTIONS.command === "login") {
+  await runGithubLoginCommand(CLI_OPTIONS);
+  process.exit(0);
+}
+
+if (CLI_OPTIONS.command === "logout") {
+  runGithubLogoutCommand();
+  process.exit(0);
+}
+
+if (CLI_OPTIONS.command === "whoami") {
+  runGithubWhoAmICommand();
+  process.exit(0);
+}
+
+const RUNTIME_CONFIG = resolvePlayRuntimeConfig(CLI_OPTIONS);
 const SERVER_URL = RUNTIME_CONFIG.serverUrl;
 const ROOM_NAME = RUNTIME_CONFIG.roomName;
+const GITHUB_SESSION = RUNTIME_CONFIG.githubSession;
+const GITHUB_AUTH_TOKEN = getGithubSessionAuthToken(GITHUB_SESSION);
+const GITHUB_LOGIN = formatGithubLogin(GITHUB_SESSION);
+const PLAYER_IDENTITY = RUNTIME_CONFIG.identityLabel;
 const PLAYER_NAME = RUNTIME_CONFIG.playerName;
 
 const PALETTE: PaletteColor[] = [
@@ -274,6 +559,18 @@ const DEFAULT_BOARD_SIZE: BoardSize = {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null;
+}
+
+function readOptionalString(value: unknown) {
+  return typeof value === "string" ? value : null;
+}
+
+function readInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
 function getCellKey(x: number, y: number) {
@@ -424,6 +721,14 @@ function getRecentPaintColor(hex: string) {
   return mixHex(hex, "#f8fafc", 0.28);
 }
 
+function getPresenceColor(hex: string, presenceHex: string | undefined) {
+  if (typeof presenceHex !== "string" || !presenceHex.startsWith("#")) {
+    return hex;
+  }
+
+  return mixHex(hex, presenceHex, 0.45);
+}
+
 function truncateLabel(value: string, maxLength: number) {
   if (value.length <= maxLength) {
     return value;
@@ -438,12 +743,82 @@ function truncateLabel(value: string, maxLength: number) {
 
 function getPlayerName(state: AwarenessState | undefined, clientId: number) {
   const rawName = state?.user?.name;
+  const rawGithubLogin = state?.user?.githubLogin;
+  const normalizedName = typeof rawName === "string" && rawName.trim().length > 0 ? rawName.trim() : null;
+  const normalizedGithubLogin =
+    typeof rawGithubLogin === "string" && rawGithubLogin.trim().length > 0 ? rawGithubLogin.trim() : null;
 
-  if (typeof rawName === "string" && rawName.trim().length > 0) {
-    return rawName.trim();
+  if (normalizedName && normalizedGithubLogin && normalizedName.toLowerCase() !== normalizedGithubLogin.toLowerCase()) {
+    return `${normalizedName} (@${normalizedGithubLogin})`;
+  }
+
+  if (normalizedName) {
+    return normalizedName;
+  }
+
+  if (normalizedGithubLogin) {
+    return `@${normalizedGithubLogin}`;
   }
 
   return `player-${String(clientId).slice(-4)}`;
+}
+
+function normalizePaintLogEntry(value: unknown): PaintLogEntry | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const id = readOptionalString(value.id);
+  const timestamp = readOptionalString(value.timestamp);
+  const x = readInteger(value.x);
+  const y = readInteger(value.y);
+  const colorId = readOptionalString(value.colorId);
+  const playerName = readOptionalString(value.playerName);
+  const githubLogin = readOptionalString(value.githubLogin) ?? undefined;
+
+  if (!id || !timestamp || x === null || y === null || !colorId || !playerName) {
+    return null;
+  }
+
+  return {
+    id,
+    timestamp,
+    x,
+    y,
+    colorId,
+    playerName,
+    githubLogin,
+  };
+}
+
+function normalizePaintLogEntries(entries: unknown[]) {
+  return entries
+    .map((entry) => normalizePaintLogEntry(entry))
+    .filter((entry): entry is PaintLogEntry => entry !== null);
+}
+
+function formatPaintActor(entry: PaintLogEntry) {
+  if (entry.githubLogin && entry.playerName.toLowerCase() !== entry.githubLogin.toLowerCase()) {
+    return `${entry.playerName} (@${entry.githubLogin})`;
+  }
+
+  if (entry.githubLogin) {
+    return `@${entry.githubLogin}`;
+  }
+
+  return entry.playerName;
+}
+
+function formatPaintTime(timestamp: string) {
+  const date = new Date(timestamp);
+
+  if (!Number.isFinite(date.getTime())) {
+    return "--:--:--";
+  }
+
+  return `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}:${String(
+    date.getSeconds(),
+  ).padStart(2, "0")}`;
 }
 
 function getRemotePlayer(state: AwarenessState | undefined, clientId: number): RemotePlayer | null {
@@ -487,12 +862,7 @@ function ColorPalette({
         const isSelected = color.id === selectedColorId;
 
         return (
-          <box
-            key={color.id}
-            flexDirection="row"
-            justifyContent="space-between"
-            onMouseDown={() => onSelect(color.id)}
-          >
+          <box key={color.id} flexDirection="row" justifyContent="space-between">
             <text fg={isSelected ? "#f8fafc" : "#cbd5e1"}>
               {isSelected ? ">" : " "} [{color.hotkey}] {color.name}
             </text>
@@ -532,15 +902,16 @@ function BoardRows({
               const isCursor = cursor.x === x && cursor.y === y;
               const remotePlayers = remotePlayersByCell[cellKey] ?? [];
               const colorHex = getColorHex(pixels[cellKey]);
-              const displayColor = recentPaints[cellKey] ? getRecentPaintColor(colorHex) : colorHex;
-              const remoteInitial = Array.from(remotePlayers[0]?.name ?? "?")[0]?.toUpperCase() ?? "?";
+              const recentPaintColor = recentPaints[cellKey] ? getRecentPaintColor(colorHex) : colorHex;
+              const primaryRemotePlayer = remotePlayers[0];
+              const displayColor = getPresenceColor(recentPaintColor, primaryRemotePlayer?.color);
               const cursorText = isCursor
                 ? "[]"
                 : remotePlayers.length === 1
-                  ? `${remoteInitial} `
-                  : remotePlayers.length > 1
-                    ? `${Math.min(remotePlayers.length, 9)}+`
-                    : "  ";
+                  ? "<>"
+                : remotePlayers.length > 1
+                  ? `${Math.min(remotePlayers.length, 9)}+`
+                  : "  ";
               const textColor =
                 cursorText.trim().length > 0 ? getReadableTextColor(displayColor) : displayColor;
 
@@ -567,31 +938,58 @@ function App() {
   const [provider] = useState(
     () =>
       new WebsocketProvider(SERVER_URL, ROOM_NAME, doc, {
+        connect: false,
+        params: GITHUB_AUTH_TOKEN ? { github_auth: GITHUB_AUTH_TOKEN } : {},
         WebSocketPolyfill: WebSocketPolyfill as unknown as typeof globalThis.WebSocket,
       }),
   );
   const [boardMap] = useState(() => doc.getMap<number>("board"));
   const [pixelsMap] = useState(() => doc.getMap<string>("pixels"));
+  const [paintLogArray] = useState(() => doc.getArray<PaintLogEntry>("paintLog"));
   const [cursor, setCursor] = useState<Cursor>(DEFAULT_CURSOR);
   const [boardSize, setBoardSize] = useState<BoardSize>(() => getBoardSizeFromState(boardMap, pixelsMap));
   const [selectedColorId, setSelectedColorId] = useState(PALETTE[0].id);
   const [pixelsSnapshot, setPixelsSnapshot] = useState<PixelSnapshot>(() => pixelsMap.toJSON() as PixelSnapshot);
+  const [paintLogSnapshot, setPaintLogSnapshot] = useState<PaintLogEntry[]>(
+    () => normalizePaintLogEntries(paintLogArray.toJSON() as unknown[]),
+  );
   const [recentPaints, setRecentPaints] = useState<RecentPaintSnapshot>({});
   const [connectionStatus, setConnectionStatus] = useState("connecting");
   const [isSynced, setIsSynced] = useState(false);
   const [playersOnline, setPlayersOnline] = useState(1);
   const [remotePlayers, setRemotePlayers] = useState<RemotePlayer[]>([]);
-  const [statusMessage, setStatusMessage] = useState(`Joining ${ROOM_NAME} as ${PLAYER_NAME}...`);
+  const [editAccess, setEditAccess] = useState<EditAccessState>(() => createInitialEditAccessState(GITHUB_SESSION, SERVER_URL));
+  const [statusMessage, setStatusMessage] = useState(
+    `Connecting to ${SERVER_URL} in room ${ROOM_NAME} as ${PLAYER_IDENTITY}...`,
+  );
   const deferredPixelsSnapshot = useDeferredValue(pixelsSnapshot);
   const selectedColor = COLOR_BY_ID[selectedColorId] ?? PALETTE[0];
   const safeCursor = sanitizeCursor(cursor, boardSize);
   const currentCellColorId = deferredPixelsSnapshot[getCellKey(safeCursor.x, safeCursor.y)];
   const currentCellColor = COLOR_BY_ID[currentCellColorId ?? ""]?.name ?? "Empty";
+  const githubStatusText = GITHUB_SESSION ? `GitHub ${GITHUB_LOGIN}` : "GitHub guest";
+  const githubHintText = GITHUB_SESSION ? "Run `pxboard logout` to clear" : "Run `pxboard login` to connect";
+  const connectionLabel = getConnectionLabel(connectionStatus);
+  const editStatusText = !editAccess.resolved
+    ? "Edit access: checking"
+    : editAccess.canEdit
+      ? "Edit access: enabled"
+      : "Edit access: read-only";
+  const editHintText = editAccess.canEdit
+    ? isTrustedLocalServerUrl(SERVER_URL)
+      ? "Local server trusts GitHub login"
+      : "Verified by collaboration server"
+    : editAccess.reason;
   const remotePlayersByCell: Record<string, RemotePlayer[]> = {};
+  const remoteCursorLabels: RemoteCursorLabel[] = [];
   const visibleRemotePlayers = remotePlayers.slice(0, 3);
-  const rawViewportWidth = Math.floor((terminal.width - SIDEBAR_WIDTH - 14) / CELL_WIDTH);
+  const visiblePaintLogs = paintLogSnapshot.slice(-MAX_VISIBLE_PAINT_LOGS).reverse();
+  const rawViewportWidth = Math.floor(
+    (terminal.width - SIDEBAR_WIDTH - ACTIVITY_WIDTH - 16 - REMOTE_CURSOR_LABEL_WIDTH) / CELL_WIDTH,
+  );
   const rawViewportHeight = terminal.height - 14;
-  const minimumWidth = SIDEBAR_WIDTH + MIN_VIEWPORT_WIDTH * CELL_WIDTH + 14;
+  const minimumWidth =
+    SIDEBAR_WIDTH + ACTIVITY_WIDTH + MIN_VIEWPORT_WIDTH * CELL_WIDTH + 16 + REMOTE_CURSOR_LABEL_WIDTH;
   const minimumHeight = MIN_VIEWPORT_HEIGHT + 14;
   const screenTooSmall = rawViewportWidth < MIN_VIEWPORT_WIDTH || rawViewportHeight < MIN_VIEWPORT_HEIGHT;
   const viewport = getBoardViewport(
@@ -610,6 +1008,37 @@ function App() {
 
     remotePlayersByCell[player.cellKey].push(player);
   });
+
+  Object.entries(remotePlayersByCell).forEach(([cellKey, playersAtCell]) => {
+    const cell = parseCellKey(cellKey);
+
+    if (
+      !cell ||
+      cell.x < viewport.startX ||
+      cell.x >= viewportEndX ||
+      cell.y < viewport.startY ||
+      cell.y >= viewportEndY
+    ) {
+      return;
+    }
+
+    const primaryPlayer = playersAtCell[0];
+    const labelSuffix = playersAtCell.length > 1 ? ` +${playersAtCell.length - 1}` : "";
+    const label = truncateLabel(`${primaryPlayer.name}${labelSuffix}`, REMOTE_CURSOR_LABEL_WIDTH - 1);
+    const desiredLeft = (cell.x - viewport.startX) * CELL_WIDTH + CELL_WIDTH;
+    const maxLeft = Math.max(viewport.width * CELL_WIDTH + REMOTE_CURSOR_LABEL_WIDTH - label.length, 0);
+    const desiredTop = cell.y - viewport.startY > 0 ? cell.y - viewport.startY - 1 : cell.y - viewport.startY + 1;
+
+    remoteCursorLabels.push({
+      key: cellKey,
+      label,
+      color: primaryPlayer.color,
+      left: clamp(desiredLeft, 0, maxLeft),
+      top: clamp(desiredTop, 0, Math.max(viewport.height - 1, 0)),
+    });
+  });
+
+  remoteCursorLabels.sort((left, right) => left.top - right.top || left.left - right.left || left.key.localeCompare(right.key));
 
   function writeBoardSize(nextBoardSize: BoardSize) {
     const currentBoardSize = getBoardSizeFromState(boardMap, pixelsMap);
@@ -672,6 +1101,11 @@ function App() {
   }
 
   function attemptPlacement(x: number, y: number) {
+    if (!editAccess.canEdit) {
+      setStatusMessage(editAccess.reason);
+      return;
+    }
+
     const currentBoardSize = getBoardSizeFromState(boardMap, pixelsMap);
     const targetCursor = { x, y };
 
@@ -692,9 +1126,23 @@ function App() {
     const expandedBoardSize = getExpandedBoardSize(currentBoardSize, targetCursor);
     const willExpand =
       expandedBoardSize.width > currentBoardSize.width || expandedBoardSize.height > currentBoardSize.height;
+    const paintLogEntry: PaintLogEntry = {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      x,
+      y,
+      colorId: selectedColorId,
+      playerName: PLAYER_NAME,
+      githubLogin: GITHUB_SESSION?.user.login,
+    };
 
     doc.transact(() => {
       pixelsMap.set(cellKey, selectedColorId);
+      paintLogArray.push([paintLogEntry]);
+
+      if (paintLogArray.length > MAX_PAINT_LOG_ENTRIES) {
+        paintLogArray.delete(0, paintLogArray.length - MAX_PAINT_LOG_ENTRIES);
+      }
 
       if (willExpand) {
         writeBoardSize(expandedBoardSize);
@@ -726,7 +1174,6 @@ function App() {
     const relativeY = event.y - board.y;
     const cellX = viewport.startX + Math.floor(relativeX / CELL_WIDTH);
     const cellY = Math.floor(relativeY);
-
     const targetCursor = {
       x: cellX,
       y: viewport.startY + cellY,
@@ -810,16 +1257,22 @@ function App() {
         return Object.fromEntries(nextEntries);
       });
     };
+    const interval = setInterval(pruneRecentPaints, RECENT_PAINT_PRUNE_MS);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, []);
+
+  useEffect(() => {
     const resetMousePainting = () => {
       isMousePaintingRef.current = false;
     };
-    const interval = setInterval(pruneRecentPaints, RECENT_PAINT_PRUNE_MS);
 
     renderer.on("blur", resetMousePainting);
     renderer.on("focus", resetMousePainting);
 
     return () => {
-      clearInterval(interval);
       renderer.off("blur", resetMousePainting);
       renderer.off("focus", resetMousePainting);
     };
@@ -828,13 +1281,14 @@ function App() {
   useEffect(() => {
     provider.awareness.setLocalStateField("user", {
       name: PLAYER_NAME,
+      githubLogin: GITHUB_SESSION?.user.login,
     });
     provider.awareness.setLocalStateField("cursor", {
       x: safeCursor.x,
       y: safeCursor.y,
       color: selectedColor.hex,
     });
-  }, [provider.awareness, safeCursor.x, safeCursor.y, selectedColor.hex]);
+  }, [GITHUB_SESSION?.user.login, PLAYER_NAME, provider.awareness, safeCursor.x, safeCursor.y, selectedColor.hex]);
 
   useEffect(() => {
     const removeInvalidPixels = () => {
@@ -905,11 +1359,11 @@ function App() {
       setConnectionStatus(event.status);
 
       if (event.status === "connected") {
-        setStatusMessage(`Connected to ${ROOM_NAME}`);
+        setStatusMessage(`Connected to ${ROOM_NAME} via ${SERVER_URL}`);
       }
 
       if (event.status === "disconnected") {
-        setStatusMessage("Connection lost. Reconnecting...");
+        setStatusMessage(`Connection lost. Reconnecting to ${SERVER_URL}...`);
       }
     };
     const handleSync = (synced: boolean) => {
@@ -937,6 +1391,11 @@ function App() {
         setBoardSize(getBoardSizeFromState(boardMap, pixelsMap));
       });
     };
+    const handlePaintLog = () => {
+      startTransition(() => {
+        setPaintLogSnapshot(normalizePaintLogEntries(paintLogArray.toJSON() as unknown[]));
+      });
+    };
     const handleAwareness = () => {
       const nextRemotePlayers: RemotePlayer[] = [];
 
@@ -959,28 +1418,54 @@ function App() {
         setRemotePlayers(nextRemotePlayers);
       });
     };
+    const previousAccessMessageHandler = provider.messageHandlers[MESSAGE_ACCESS];
+    const handleAccessMessage = ((
+      _encoder: unknown,
+      decoder: decoding.Decoder,
+    ) => {
+      const canEdit = decoding.readVarUint(decoder) === 1;
+      const reason = decoding.readVarString(decoder).trim();
 
+      startTransition(() => {
+        setEditAccess({
+          resolved: true,
+          canEdit,
+          reason: canEdit ? "" : reason || "GitHub login is required to paint. Run `pxboard login`.",
+        });
+      });
+
+      if (!canEdit) {
+        setStatusMessage(reason || "GitHub login is required to paint. Run `pxboard login`.");
+      }
+    }) as (typeof provider.messageHandlers)[number];
+
+    provider.messageHandlers[MESSAGE_ACCESS] = handleAccessMessage;
     pixelsMap.observe(handlePixels);
     boardMap.observe(handleBoard);
+    paintLogArray.observe(handlePaintLog);
     provider.on("status", handleStatus);
     provider.on("sync", handleSync);
     provider.awareness.on("change", handleAwareness);
+    provider.connect();
 
     syncBoardMetadata();
     handlePixels();
     handleBoard();
+    handlePaintLog();
     handleAwareness();
 
     return () => {
+      provider.messageHandlers[MESSAGE_ACCESS] = previousAccessMessageHandler;
       pixelsMap.unobserve(handlePixels);
       boardMap.unobserve(handleBoard);
+      paintLogArray.unobserve(handlePaintLog);
       provider.off("status", handleStatus);
       provider.off("sync", handleSync);
       provider.awareness.off("change", handleAwareness);
       provider.destroy();
       doc.destroy();
     };
-  }, [boardMap, doc, pixelsMap, provider]);
+  }, [boardMap, doc, paintLogArray, pixelsMap, provider]);
 
   return (
     <box width="100%" height="100%" flexDirection="column" backgroundColor={APP_BACKGROUND}>
@@ -995,7 +1480,7 @@ function App() {
       >
         <text fg="#f8fafc">Pixel Game</text>
         <text fg="#cbd5e1">
-          Room {ROOM_NAME} | {PLAYER_NAME} | {playersOnline} online
+          Room {ROOM_NAME} | {playersOnline} online
         </text>
       </box>
 
@@ -1023,8 +1508,13 @@ function App() {
             View y: {viewport.startY + 1}-{viewportEndY}
           </text>
           <text fg="#94a3b8">Cell: {currentCellColor}</text>
-          <text fg="#94a3b8">Connection: {connectionStatus}</text>
+          <text fg="#94a3b8">Connection: {connectionLabel}</text>
           <text fg={isSynced ? READY_COLOR : WARNING_COLOR}>{isSynced ? "Synced" : "Syncing..."}</text>
+          <text fg="#94a3b8">Player: {truncateLabel(PLAYER_IDENTITY, 22)}</text>
+          <text fg={GITHUB_SESSION ? READY_COLOR : WARNING_COLOR}>{truncateLabel(githubStatusText, 22)}</text>
+          <text fg="#64748b">{truncateLabel(githubHintText, 26)}</text>
+          <text fg={editAccess.canEdit ? READY_COLOR : WARNING_COLOR}>{truncateLabel(editStatusText, 22)}</text>
+          <text fg="#64748b">{truncateLabel(editHintText, 26)}</text>
           <text fg="#f8fafc">Live cursors</text>
           {visibleRemotePlayers.length === 0 ? (
             <text fg="#64748b">Waiting for another painter</text>
@@ -1039,11 +1529,12 @@ function App() {
             <text fg="#64748b">+{remotePlayers.length - visibleRemotePlayers.length} more nearby</text>
           ) : null}
           <text fg="#64748b">Arrows/WASD/HJKL move</text>
-          <text fg="#64748b">Enter/Space paints</text>
+          <text fg="#64748b">{editAccess.canEdit ? "Enter/Space paints" : "Enter/Space locked"}</text>
           <text fg="#64748b">1-8 selects color</text>
-          <text fg="#64748b">Initials mark live cursors</text>
+          <text fg="#64748b">Live cursor cells are color-tinted</text>
+          <text fg="#64748b">Name tags track visible cursors</text>
           <text fg="#64748b">Fresh paint glows briefly</text>
-          <text fg="#64748b">Click paints the board</text>
+          <text fg="#64748b">{editAccess.canEdit ? "Click paints the board" : "Click only moves cursor"}</text>
           <text fg="#64748b">Push or paint east/south edge to grow</text>
           <text fg="#64748b">Esc or Q exits</text>
         </box>
@@ -1067,39 +1558,88 @@ function App() {
               {MIN_VIEWPORT_HEIGHT} viewport.
             </text>
           ) : (
-            <box
-              ref={boardRef}
-              width={viewport.width * CELL_WIDTH}
-              height={viewport.height}
-              onMouseMove={(event) => updateCursorFromMouse(event, false)}
-              onMouseDown={(event) => {
-                isMousePaintingRef.current = event.button === MouseButton.LEFT;
-                updateCursorFromMouse(event, isMousePaintingRef.current);
-              }}
-              onMouseUp={() => {
-                isMousePaintingRef.current = false;
-              }}
-              onMouseDrag={(event) => {
-                if (!isMousePaintingRef.current) {
-                  return;
-                }
+            <box width={viewport.width * CELL_WIDTH + REMOTE_CURSOR_LABEL_WIDTH} height={viewport.height}>
+              <box
+                ref={boardRef}
+                width={viewport.width * CELL_WIDTH}
+                height={viewport.height}
+                onMouseMove={(event) => updateCursorFromMouse(event, false)}
+                onMouseDown={(event) => {
+                  isMousePaintingRef.current = event.button === MouseButton.LEFT;
+                  updateCursorFromMouse(event, isMousePaintingRef.current);
+                }}
+                onMouseUp={() => {
+                  isMousePaintingRef.current = false;
+                }}
+                onMouseDrag={(event) => {
+                  if (!isMousePaintingRef.current) {
+                    return;
+                  }
 
-                updateCursorFromMouse(event, true);
-              }}
-              onMouseDragEnd={() => {
-                isMousePaintingRef.current = false;
-              }}
-            >
-              <BoardRows
-                pixels={deferredPixelsSnapshot}
-                cursor={safeCursor}
-                viewport={viewport}
-                remotePlayersByCell={remotePlayersByCell}
-                recentPaints={recentPaints}
-              />
+                  updateCursorFromMouse(event, true);
+                }}
+                onMouseDragEnd={() => {
+                  isMousePaintingRef.current = false;
+                }}
+              >
+                <BoardRows
+                  pixels={deferredPixelsSnapshot}
+                  cursor={safeCursor}
+                  viewport={viewport}
+                  remotePlayersByCell={remotePlayersByCell}
+                  recentPaints={recentPaints}
+                />
+              </box>
+              {remoteCursorLabels.map((remoteCursorLabel) => (
+                <box
+                  key={remoteCursorLabel.key}
+                  position="absolute"
+                  left={remoteCursorLabel.left}
+                  top={remoteCursorLabel.top}
+                  zIndex={1}
+                >
+                  <text bg={remoteCursorLabel.color} fg={getReadableTextColor(remoteCursorLabel.color)}>
+                    {remoteCursorLabel.label}
+                  </text>
+                </box>
+              ))}
             </box>
           )}
           <text fg="#94a3b8">{statusMessage}</text>
+        </box>
+
+        <box
+          width={ACTIVITY_WIDTH}
+          border
+          borderColor={BORDER_COLOR}
+          backgroundColor={PANEL_BACKGROUND}
+          padding={1}
+          flexDirection="column"
+          gap={1}
+        >
+          <text fg="#f8fafc">Paint log</text>
+          <text fg="#94a3b8">{paintLogSnapshot.length} events</text>
+          {visiblePaintLogs.length === 0 ? (
+            <text fg="#64748b">No paint yet</text>
+          ) : (
+            visiblePaintLogs.map((entry) => {
+              const color = COLOR_BY_ID[entry.colorId];
+
+              return (
+                <box key={entry.id} flexDirection="column">
+                  <text fg={color?.hex ?? "#f8fafc"}>
+                    {truncateLabel(`${formatPaintActor(entry)} -> ${color?.name ?? entry.colorId}`, ACTIVITY_WIDTH - 4)}
+                  </text>
+                  <text fg="#64748b">
+                    {truncateLabel(`${formatPaintTime(entry.timestamp)} (${entry.x + 1}, ${entry.y + 1})`, ACTIVITY_WIDTH - 4)}
+                  </text>
+                </box>
+              );
+            })
+          )}
+          {paintLogSnapshot.length > visiblePaintLogs.length ? (
+            <text fg="#64748b">+{paintLogSnapshot.length - visiblePaintLogs.length} older events</text>
+          ) : null}
         </box>
       </box>
 
@@ -1113,9 +1653,13 @@ function App() {
         justifyContent="space-between"
       >
         <text fg="#94a3b8">
-          {connectionStatus === "connected" ? "Connected" : "Reconnecting"} | Collaborative via Yjs websocket
+          {connectionLabel} | {githubStatusText}
         </text>
-        <text fg={READY_COLOR}>No cooldown | Live presence | Frontier growth</text>
+        <text fg={editAccess.canEdit ? READY_COLOR : WARNING_COLOR}>
+          {editAccess.canEdit
+            ? "Paint enabled | Live presence | Frontier growth"
+            : truncateLabel(editAccess.reason, 42)}
+        </text>
       </box>
     </box>
   );
