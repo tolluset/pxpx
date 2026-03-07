@@ -36,3 +36,11 @@ PIXEL_SERVER_URL=wss://<worker-url> pnpm dev:client
 ```
 
 The room name continues to be controlled by `PIXEL_ROOM`.
+
+## Current Default
+
+The client default was updated to the deployed worker URL so a built client can connect without extra environment setup:
+
+```bash
+wss://pixel-game-collab.dlqud19.workers.dev
+```

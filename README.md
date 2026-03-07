@@ -14,11 +14,21 @@ Terminal pixel board built with OpenTUI and Yjs.
 
 ```bash
 pnpm install
-pnpm dev:server
 pnpm dev:client
 ```
 
+By default, the client now connects to the deployed Cloudflare server.
+
 Open multiple terminals and run `pnpm dev:client` in each one to verify collaboration.
+
+## Build A Runnable Binary
+
+You can build a standalone executable with Bun:
+
+```bash
+pnpm build:client
+./dist/pixel-game
+```
 
 ## Cloudflare Deployment
 
@@ -43,7 +53,7 @@ PIXEL_SERVER_URL=wss://pixel-game-collab.<your-subdomain>.workers.dev pnpm dev:c
 
 ## Environment Variables
 
-- `PIXEL_SERVER_URL`: defaults to `ws://localhost:1234`
+- `PIXEL_SERVER_URL`: defaults to `wss://pixel-game-collab.dlqud19.workers.dev`
 - `PIXEL_ROOM`: defaults to `pixel-game`
 - `PIXEL_NAME`: defaults to a random `player-xxxx` name
 - `CLOUDFLARE_API_TOKEN`: optional if using token-based Wrangler auth
@@ -59,7 +69,9 @@ PIXEL_SERVER_URL=wss://pixel-game-collab.<your-subdomain>.workers.dev pnpm dev:c
 
 ## Note
 
-- `pnpm dev:server` keeps the original local Bun-based websocket server for fast local testing.
+- `pnpm dev:server` keeps the original local Bun-based websocket server for local testing.
+- Local server testing now needs an override:
+  `PIXEL_SERVER_URL=ws://localhost:1234 pnpm dev:client`
 - `wrangler.toml` configures the deployable Cloudflare collaboration server.
 - Durable Object storage persists the board state between worker restarts.
 - The repository does not contain `PRD.json`. Implementation was based on `PRD.md`, then updated to remove the placement timeout limit.

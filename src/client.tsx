@@ -45,7 +45,8 @@ const PANEL_BACKGROUND = "#0f172a";
 const BORDER_COLOR = "#334155";
 const READY_COLOR = "#22c55e";
 const WARNING_COLOR = "#f59e0b";
-const SERVER_URL = process.env.PIXEL_SERVER_URL ?? "ws://localhost:1234";
+const DEFAULT_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
+const SERVER_URL = process.env.PIXEL_SERVER_URL ?? DEFAULT_SERVER_URL;
 const ROOM_NAME = process.env.PIXEL_ROOM ?? "pixel-game";
 const PLAYER_NAME = process.env.PIXEL_NAME ?? `player-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -65,6 +66,7 @@ const COLOR_BY_HOTKEY = Object.fromEntries(PALETTE.map((color) => [color.hotkey,
   string,
   PaletteColor
 >;
+const DEFAULT_CURSOR: Cursor = { x: 0, y: 0 };
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(Math.max(value, min), max);
@@ -72,6 +74,42 @@ function clamp(value: number, min: number, max: number) {
 
 function getCellKey(x: number, y: number) {
   return `${x},${y}`;
+}
+
+function isValidBoardIndex(value: number, size: number) {
+  return Number.isInteger(value) && value >= 0 && value < size;
+}
+
+function isValidCursor(cursor: Cursor) {
+  return isValidBoardIndex(cursor.x, BOARD_WIDTH) && isValidBoardIndex(cursor.y, BOARD_HEIGHT);
+}
+
+function sanitizeBoardIndex(value: number, size: number) {
+  if (!Number.isFinite(value)) {
+    return 0;
+  }
+
+  return clamp(Math.floor(value), 0, size - 1);
+}
+
+function sanitizeCursor(cursor: Cursor): Cursor {
+  return {
+    x: sanitizeBoardIndex(cursor.x, BOARD_WIDTH),
+    y: sanitizeBoardIndex(cursor.y, BOARD_HEIGHT),
+  };
+}
+
+function isValidCellKey(key: string) {
+  const [xValue, yValue, extra] = key.split(",");
+
+  if (xValue === undefined || yValue === undefined || extra !== undefined) {
+    return false;
+  }
+
+  return isValidCursor({
+    x: Number(xValue),
+    y: Number(yValue),
+  });
 }
 
 function getColorHex(colorId: string | undefined) {
@@ -159,7 +197,7 @@ function App() {
       }),
   );
   const [pixelsMap] = useState(() => doc.getMap<string>("pixels"));
-  const [cursor, setCursor] = useState<Cursor>({ x: 0, y: 0 });
+  const [cursor, setCursor] = useState<Cursor>(DEFAULT_CURSOR);
   const [selectedColorId, setSelectedColorId] = useState(PALETTE[0].id);
   const [pixelsSnapshot, setPixelsSnapshot] = useState<PixelSnapshot>(() => pixelsMap.toJSON() as PixelSnapshot);
   const [connectionStatus, setConnectionStatus] = useState("connecting");
@@ -168,7 +206,8 @@ function App() {
   const [statusMessage, setStatusMessage] = useState(`Joining ${ROOM_NAME} as ${PLAYER_NAME}...`);
   const deferredPixelsSnapshot = useDeferredValue(pixelsSnapshot);
   const selectedColor = COLOR_BY_ID[selectedColorId] ?? PALETTE[0];
-  const currentCellColorId = deferredPixelsSnapshot[getCellKey(cursor.x, cursor.y)];
+  const safeCursor = sanitizeCursor(cursor);
+  const currentCellColorId = deferredPixelsSnapshot[getCellKey(safeCursor.x, safeCursor.y)];
   const currentCellColor = COLOR_BY_ID[currentCellColorId ?? ""]?.name ?? "Empty";
   const minimumWidth = SIDEBAR_WIDTH + BOARD_WIDTH * CELL_WIDTH + 14;
   const minimumHeight = BOARD_HEIGHT + 8;
@@ -183,8 +222,8 @@ function App() {
 
   function moveCursor(dx: number, dy: number) {
     setCursor((previous) => ({
-      x: clamp(previous.x + dx, 0, BOARD_WIDTH - 1),
-      y: clamp(previous.y + dy, 0, BOARD_HEIGHT - 1),
+      x: clamp(sanitizeCursor(previous).x + dx, 0, BOARD_WIDTH - 1),
+      y: clamp(sanitizeCursor(previous).y + dy, 0, BOARD_HEIGHT - 1),
     }));
   }
 
@@ -200,6 +239,10 @@ function App() {
   }
 
   function attemptPlacement(x: number, y: number) {
+    if (!isValidCursor({ x, y })) {
+      return;
+    }
+
     setCursor({ x, y });
 
     const cellKey = getCellKey(x, y);
@@ -221,12 +264,21 @@ function App() {
       return;
     }
 
+    if (
+      !Number.isFinite(event.x) ||
+      !Number.isFinite(event.y) ||
+      !Number.isFinite(board.screenX) ||
+      !Number.isFinite(board.screenY)
+    ) {
+      return;
+    }
+
     const relativeX = event.x - board.screenX;
     const relativeY = event.y - board.screenY;
     const cellX = Math.floor(relativeX / CELL_WIDTH);
     const cellY = relativeY;
 
-    if (cellX < 0 || cellX >= BOARD_WIDTH || cellY < 0 || cellY >= BOARD_HEIGHT) {
+    if (!isValidCursor({ x: cellX, y: cellY })) {
       return;
     }
 
@@ -269,7 +321,7 @@ function App() {
     }
 
     if (key.name === "return" || key.name === "enter" || key.name === "space") {
-      attemptPlacement(cursor.x, cursor.y);
+      attemptPlacement(safeCursor.x, safeCursor.y);
       return;
     }
 
@@ -289,13 +341,34 @@ function App() {
       name: PLAYER_NAME,
     });
     provider.awareness.setLocalStateField("cursor", {
-      x: cursor.x,
-      y: cursor.y,
+      x: safeCursor.x,
+      y: safeCursor.y,
       color: selectedColor.hex,
     });
-  }, [cursor.x, cursor.y, provider.awareness, selectedColor.hex]);
+  }, [provider.awareness, safeCursor.x, safeCursor.y, selectedColor.hex]);
 
   useEffect(() => {
+    const removeInvalidPixels = () => {
+      const invalidKeys: string[] = [];
+
+      pixelsMap.forEach((_, key) => {
+        if (!isValidCellKey(key)) {
+          invalidKeys.push(key);
+        }
+      });
+
+      if (invalidKeys.length === 0) {
+        return false;
+      }
+
+      doc.transact(() => {
+        invalidKeys.forEach((key) => {
+          pixelsMap.delete(key);
+        });
+      });
+
+      return true;
+    };
     const handleStatus = (event: { status: string }) => {
       setConnectionStatus(event.status);
 
@@ -315,6 +388,10 @@ function App() {
       }
     };
     const handlePixels = () => {
+      if (removeInvalidPixels()) {
+        return;
+      }
+
       startTransition(() => {
         setPixelsSnapshot(pixelsMap.toJSON() as PixelSnapshot);
       });
@@ -374,7 +451,7 @@ function App() {
           <ColorPalette selectedColorId={selectedColorId} onSelect={setSelectedColor} />
           <text fg="#94a3b8">Selected: {selectedColor.name}</text>
           <text fg="#94a3b8">
-            Cursor: ({cursor.x + 1}, {cursor.y + 1})
+            Cursor: ({safeCursor.x + 1}, {safeCursor.y + 1})
           </text>
           <text fg="#94a3b8">Cell: {currentCellColor}</text>
           <text fg="#94a3b8">Connection: {connectionStatus}</text>
@@ -411,7 +488,7 @@ function App() {
               onMouseDown={(event) => updateCursorFromMouse(event, true)}
               onMouseDrag={(event) => updateCursorFromMouse(event, true)}
             >
-              <BoardRows pixels={deferredPixelsSnapshot} cursor={cursor} />
+              <BoardRows pixels={deferredPixelsSnapshot} cursor={safeCursor} />
             </box>
           )}
           <text fg="#94a3b8">{statusMessage}</text>
