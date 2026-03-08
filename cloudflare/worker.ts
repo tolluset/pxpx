@@ -13,9 +13,9 @@ const INITIAL_BOARD_WIDTH = 16;
 const INITIAL_BOARD_HEIGHT = 16;
 const MAX_PAINT_LOG_ENTRIES = 200;
 const MAX_API_COORDINATE = 4095;
-const REPOSITORY_ROOM_DECORATION_VERSION = 2;
-const REPOSITORY_ROOM_DECORATION_BOARD_WIDTH = 40;
-const REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT = 24;
+const REPOSITORY_ROOM_DECORATION_VERSION = 3;
+const REPOSITORY_ROOM_DECORATION_BOARD_WIDTH = 24;
+const REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT = 16;
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const MESSAGE_ACCESS = 4;
@@ -590,35 +590,24 @@ function createRepositoryDecorationCells(repositoryRoom: RepositoryRoom) {
   const cornerFramePoints: Array<[number, number]> = [
     [0, 0],
     [1, 0],
-    [2, 0],
     [0, 1],
-    [0, 2],
   ];
-  const cornerAccentPoints: Array<[number, number]> = [
-    [1, 1],
-    [2, 1],
-  ];
+  const cornerAccentPoints: Array<[number, number]> = [[1, 1]];
   const slashPoints: Array<[number, number]> = [
-    [0, 3],
-    [1, 2],
-    [2, 1],
-    [3, 0],
-    [4, 1],
-    [5, 2],
-    [6, 3],
-    [7, 4],
+    [0, 2],
+    [1, 1],
+    [2, 0],
+    [3, 1],
+    [4, 2],
   ];
   const shadowPoints: Array<[number, number]> = [
-    [0, 4],
-    [3, 1],
-    [6, 4],
-    [7, 5],
+    [0, 3],
+    [4, 3],
   ];
   const sparkles: Array<[number, number]> = [
-    [10 + sparkleOffset, 4],
-    [16, 2 + slashYOffset],
-    [24, 18 - slashYOffset],
-    [30 - sparkleOffset, 15],
+    [7 + sparkleOffset, 3],
+    [15, 2 + slashYOffset],
+    [17 - sparkleOffset, 12],
   ];
 
   pushDecorationCells(cells, 2, 2, cornerFramePoints, primary);
@@ -657,8 +646,8 @@ function createRepositoryDecorationCells(repositoryRoom: RepositoryRoom) {
       mirrorY: true,
     },
   );
-  pushDecorationCells(cells, 16, 9 + slashYOffset, slashPoints, accent);
-  pushDecorationCells(cells, 16, 9 + slashYOffset, shadowPoints, neutral);
+  pushDecorationCells(cells, 10, 6 + slashYOffset, slashPoints, accent);
+  pushDecorationCells(cells, 10, 6 + slashYOffset, shadowPoints, neutral);
 
   for (const [x, y] of sparkles) {
     cells.push({
