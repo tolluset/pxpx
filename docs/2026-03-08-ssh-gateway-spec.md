@@ -1,267 +1,670 @@
-# SSH Gateway Spec
+# SSH Gateway Architecture And Deployment Notes
 
 ## Status
 
 Implemented on the OCI test host on 2026-03-08.
 
-The custom gateway described here now backs the hosted SSH entrypoint. Some deployment details may still evolve.
+This document started as a product spec and now serves as the main knowledge log for the hosted SSH entrypoint:
+
+- target user experience
+- actual implementation shape
+- deployment process on the first public host
+- operational runbook
+- lessons learned while shipping it
 
 ## Goal
 
-Allow users to join a room through a native SSH command:
+Give users a native terminal entrypoint into a shared board:
 
 ```bash
-ssh pxpx.space
-ssh -t pxpx.space facebook/react
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
 ```
 
-The command should launch the existing terminal client and connect it to the same shared room model already used by the local client and Cloudflare Worker backend.
+The command should feel like a product surface, not like "logging into a server". The board itself remains the existing `pxpx` terminal client connected to the existing collaboration backend.
+
+## Product Mental Model
+
+`pxpx.sh` is not a general-purpose shell box.
+
+It is closer to:
+
+- a terminal-native app launcher
+- carried over SSH transport
+- with the real shared state living in the collaboration server
+
+That distinction matters because it drives almost every implementation decision:
+
+- the host should not expose a normal shell
+- the SSH username should not be part of the product contract
+- the launched process should always be `pxpx`
+- room selection should be treated like application routing, not host login
+
+## User Experience Contract
+
+### Supported Commands
+
+```bash
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
+ssh pxpx.sh -- --help
+ssh pxpx.sh login
+ssh pxpx.sh whoami
+ssh pxpx.sh access status facebook/react
+```
+
+### Command Semantics
+
+- Empty remote command launches the default room.
+- A single `owner/repo` token launches that repository room.
+- `login`, `logout`, `whoami`, and `access ...` are treated as non-interactive control commands.
+- Unsupported commands return a short validation error and close.
+
+### Explicit Non-Goals
+
+- general shell access on the public port
+- arbitrary command execution
+- file transfer over `scp` or `sftp`
+- agent forwarding, X11 forwarding, or TCP forwarding
+- persistent shell sessions after disconnect
 
 ## Existing Building Blocks
 
-- The client already accepts a positional GitHub repository selector such as `owner/repo`.
+The SSH entrypoint works because the rest of the project already had the core room model.
+
+- The terminal client already accepts a positional repository selector such as `owner/repo`.
 - The client already normalizes repository selectors into room names.
-- The collaboration worker already accepts slash-separated room names such as `owner/repo`.
+- The collaboration worker already accepts slash-separated room names.
 
 Relevant code:
 
 - `src/client.tsx`
 - `cloudflare/worker.ts`
 
-## User Experience
+The hosted SSH gateway is therefore only a transport and process launcher. It does not own room state.
 
-### Phase 1
+## Why A Custom SSH Gateway Was Needed
 
-- `ssh pxpx.space`
-  - Launch the terminal client in a default room such as `pixel-game`.
-- `ssh -t pxpx.space facebook/react`
-  - Launch the terminal client in room `facebook/react`.
-- `ssh -t pxpx.space owner/repo`
-  - Behaves the same as `pxboard owner/repo`.
+### First Attempt: System `sshd` + `ForceCommand`
 
-### Out Of Scope
+The simplest version worked with a dedicated Unix user and a forced command:
 
-- General shell access on the host
-- Running arbitrary remote commands
-- Reusing a persistent shell session after disconnect
-- SSH file transfer features such as `scp` or `sftp`
+- user connects with `ssh pxpx@host`
+- `sshd` logs them into the `pxpx` Unix account
+- `ForceCommand` launches `pxpx`
 
-## Routing Rules
+This is enough for:
 
-- Empty remote command maps to the default room.
-- A single remote argument matching `owner/repo` maps to that room.
-- Invalid selectors return a short error in the terminal and close the session.
-- Future support for named rooms such as `--room design-review` is optional and not required for Phase 1.
+```bash
+ssh pxpx@131.186.25.184
+ssh -t pxpx@131.186.25.184 facebook/react
+```
 
-## Server Behavior
+### Why That Was Not Enough
 
-On each SSH connection:
+The product hook wanted:
 
-1. Accept the SSH session and allocate a PTY.
-2. Read the remote command string.
-3. Validate and normalize the room selector.
-4. Launch `pxboard` with either:
-   - no room argument, or
-   - a normalized `owner/repo` argument.
-5. Attach the SSH PTY to the launched process.
-6. Terminate the process when the SSH session closes.
+```bash
+ssh pxpx.sh
+```
 
-The SSH layer is only a transport and launcher. Shared game state continues to live in the existing collaboration backend.
+without requiring every user to add a local SSH alias such as:
 
-## Architecture
+```sshconfig
+Host pxpx.sh
+  User pxpx
+```
 
-### Application Flow
+That requirement breaks the `sshd + ForceCommand` model because the SSH username is chosen by the client before the server sees the session. The server cannot tell OpenSSH clients "actually log in as `pxpx` instead".
+
+That led to the final decision:
+
+- public port `22` is owned by a custom SSH server
+- the custom server ignores the presented SSH username
+- admin shell access moves to a separate port
+
+## Final Hosted Architecture
+
+### Network Shape
 
 ```text
 SSH client
-  -> SSH gateway host
-  -> pxboard process
+  -> custom SSH gateway on public TCP 22
+  -> pxpx process
   -> Cloudflare Worker websocket backend
   -> Durable Object room
 ```
 
-### Current Hosted Design
+### Administrative Access
 
-Use a custom SSH gateway on public port `22`.
+```text
+Admin SSH client
+  -> system sshd on TCP 2222
+  -> ubuntu shell
+```
 
-- SSH entrypoint: custom SSH server
-- Runtime launcher: `pxpx` only
-- Runtime user: dedicated unprivileged local user such as `pxpx`
-- Host shell access: separate system `sshd` on admin port `2222`
-- Long-running service management: `systemd` or `launchd`
+### Current Host Layout
 
-This is what enables plain `ssh pxpx.sh` without requiring every user to set `User pxpx` in local SSH config.
+- Public board entrypoint: custom gateway on port `22`
+- Admin shell: system `sshd` on port `2222`
+- Public DNS: `pxpx.sh -> 131.186.25.184`
+- Runtime OS user for board sessions: `pxpx`
+- Admin OS user: `ubuntu`
+- Service manager: `systemd`
 
-### Future Gateway Enhancements
+### Why This Split Is Good
 
-The custom SSH gateway can grow later if the project needs:
+- Users get the clean product command: `ssh pxpx.sh`
+- Admins still have normal SSH for maintenance
+- The board runtime is isolated from the maintenance shell
+- Public traffic does not land in `sshd`
 
-- custom SSH banners
-- richer deep-link commands
-- connection telemetry
-- host-independent packaging
+## Repository Code Map
 
-## Network And DNS Options
+### Entry Points
 
-### Option A: Direct Public SSH On The Home Host
+- `src/ssh-gateway.ts`
+  - compatibility bootstrap for the hosted SSH gateway process
+- `src/ssh-gateway/main.ts`
+  - startup wiring
 
-How it works:
+### Core Modules
 
-- `pxpx.space` points to the home public IP.
-- The router forwards TCP `22` to the Mac mini.
-- Users connect with plain `ssh pxpx.space`.
+- `src/ssh-gateway/config.ts`
+  - env parsing, host key loading, run user lookup, runner paths
+- `src/ssh-gateway/command-plan.ts`
+  - command tokenization, repo slug normalization, access command validation
+- `src/ssh-gateway/runtime.ts`
+  - `ssh2` session handling, auth, PTY checks, child process orchestration
+- `src/ssh-gateway/errors.ts`
+  - typed startup and validation errors
+- `src/ssh-gateway/types.ts`
+  - shared runtime types
 
-Pros:
+### Child Process Runner
 
-- preserves the target UX exactly
-- no client-side helper software
-- simplest mental model
+- `scripts/ssh-pty-runner.py`
+  - creates a PTY with `forkpty`
+  - launches the configured command
+  - handles stdin/stdout bridging
+  - accepts window-size updates over a control socket
 
-Cons:
+### Shared Client/Auth Code Reused By The Gateway
 
-- the home public IP may change
-- requires inbound port exposure
-- depends on router configuration and ISP policies
-- not ideal as the default open source install story
+- `src/github-auth.ts`
+  - now supports `PIXEL_GITHUB_AUTH_FILE`
+- `src/client.tsx`
+  - still owns the board UX and GitHub auth commands
 
-Notes:
+## Connection Lifecycle
 
-- If the ISP gives a dynamic public IP, DNS must be updated whenever the IP changes.
-- This can be handled with dynamic DNS or an automated Cloudflare DNS update job.
-- If the ISP uses CGNAT, direct inbound SSH may not be possible.
+The SSH gateway performs the following steps for each connection.
 
-### Option B: Cloudflare Tunnel To The Home Host
+### 1. Accept SSH Public-Key Authentication
 
-How it works:
+The gateway accepts public-key authentication and verifies the signature against the presented public key.
 
-- `cloudflared` runs on the Mac mini and creates an outbound tunnel to Cloudflare.
-- No inbound port needs to be opened on the home router.
+Important detail:
 
-Pros:
+- the SSH username is accepted but not used as the product identity
+- the public key fingerprint is the stable identity input
 
-- no public inbound port on the home network
-- avoids dynamic public IP management
-- good self-hosted story for personal deployments
+This gives the hosted product two useful properties:
 
-Cons:
+- `ssh pxpx.sh` works without a fixed Unix username
+- GitHub login state can be isolated per SSH key
 
-- native plain `ssh pxpx.space` is not the default client path
-- users typically need Cloudflare client-side tooling such as `cloudflared` or WARP, depending on the tunnel mode
-- this changes the end-user setup and weakens the zero-config public demo UX
+### 2. Build An App-Level Identity
 
-Decision:
+After authentication, the gateway derives:
 
-- Supportable as an installation mode
-- Not the default recommendation for the public shared host if the goal is plain `ssh -t pxpx.space owner/repo`
+- SSH key fingerprint
+- presented SSH username, for logs only
+- per-user auth file path under the configured auth root
 
-### Option C: VPS Relay In Front Of The Home Host
+The per-user auth path is then passed to the child process through `PIXEL_GITHUB_AUTH_FILE`.
 
-How it works:
+That prevents all remote users from sharing one global GitHub login file.
 
-- A small VPS exposes public TCP `22`.
-- The home host creates an outbound tunnel or reverse connection to the VPS.
-- Users connect to the VPS with plain `ssh pxpx.space`.
+### 3. Parse The Requested Command
 
-Pros:
+The gateway converts the SSH command into an internal command plan:
 
-- preserves the target UX exactly
-- stable public IP and DNS
-- no inbound home port required
-- better fit for a public open source hosted endpoint
+- empty command -> interactive default room
+- `owner/repo` -> interactive room
+- `login`, `logout`, `whoami`, `access ...` -> plain command mode
+- everything else -> validation error
 
-Cons:
+The validation rules intentionally stay narrow. The public entrypoint should only launch supported app actions.
 
-- adds a second machine and operating cost
-- requires tunnel or relay management between VPS and home host
+### 4. Decide Whether A PTY Is Required
 
-Decision:
+Interactive room sessions require a PTY. Plain commands do not.
 
-- Recommended public-hosted architecture
-- Recommended fallback when the home ISP changes IPs often or uses CGNAT
+That is why:
 
-## Recommended Product Decision
+```bash
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
+```
 
-### For A Public Shared Host
+work, but:
 
-Prefer a VPS relay in front of the game host.
+```bash
+ssh pxpx.sh facebook/react
+```
 
-Reasoning:
+still needs `-t`.
 
-- It preserves `ssh -t pxpx.space owner/repo`.
-- It does not require end users to install Cloudflare client tooling.
-- It avoids direct inbound exposure on a home network.
+This is not just an implementation quirk. In standard SSH, the client decides whether to request a PTY. The server cannot force an already-open `exec` channel to become a PTY-backed interactive terminal.
 
-### For Personal Self-Hosting
+Relevant code:
 
-Support two installation modes:
+- `src/ssh-gateway/runtime.ts`
 
-- Direct public SSH mode for users with a stable public IP or working DDNS
-- Cloudflare Tunnel mode for users who do not want to open inbound ports and are willing to accept client-side Cloudflare requirements
+### 5. Launch The Child Process As `pxpx`
 
-## Process Isolation Requirements
+The gateway never launches a shell. It launches only the configured board command.
 
-The SSH entrypoint must not expose the host as a normal shell box.
+Default command:
 
-### Required Isolation Controls
+```text
+/usr/local/bin/pxpx
+```
 
-- Create a dedicated unprivileged OS user such as `pxpx`
-- Run the board process as that unprivileged user even if the gateway itself binds port `22`
-- Reject any remote command that is not empty or a valid `pxpx` subcommand
-- Disable SSH forwarding features:
-  - TCP forwarding
-  - agent forwarding
-  - X11 forwarding
-  - tunneling
-- Disable `sftp` and general shell access
-- Use a fixed working directory
-- Pass a minimal environment to the launched process
-- Keep runtime logs separate from normal user activity
-- Set connection and idle timeouts
-- Limit concurrent sessions per host
+The process is run as the dedicated unprivileged Unix user defined by `PXPX_GATEWAY_RUN_AS_USER`.
 
-### Auth Storage Requirements
+### 6. Bridge I/O And Window Resizes
 
-- The hosted gateway must not share one GitHub auth file across every remote user.
-- Store `pxpx login` state by SSH public-key fingerprint.
-- Pass a per-identity auth file path to the child process with `PIXEL_GITHUB_AUTH_FILE`.
-- If the gateway ever supports anonymous SSH, anonymous sessions must not reuse persistent auth state.
+For interactive sessions:
 
-## macOS Host Requirements
+- the child process gets a PTY
+- SSH input is forwarded to the PTY
+- PTY output is forwarded back to the SSH channel
+- `window-change` events are forwarded to the PTY runner
 
-- Dedicated Mac mini or another always-on machine
-- Sleep disabled while acting as a host
-- Automatic restart of the launcher environment after reboot via `launchd`
-- A dedicated directory for the project runtime and logs
-- Clear separation between the maintainer's normal login account and the SSH gateway account
+### 7. Tear Down Cleanly
 
-## Install Guide Follow-Up
+When the SSH session closes:
 
-When implementation starts, add a user-facing installation guide for:
+- the child process is terminated
+- the resize control socket is removed
+- logs retain the fingerprint prefix for correlation
 
-- macOS direct public SSH mode
-- macOS Cloudflare Tunnel mode
-- VPS relay mode
+## Security Model
 
-That guide should include:
+### Public Port 22
 
-- DNS setup
-- router setup when applicable
-- Cloudflare setup when applicable
-- `sshd` hardening
-- launcher installation
-- `launchd` service registration
-- update and rollback steps
-- troubleshooting for PTY issues and connection failures
+The public gateway is intentionally narrower than OpenSSH.
 
-## Security Notes
+It rejects:
 
-- Treat all remote command input as untrusted.
-- Do not expose repository checkout write access to the SSH runtime user.
-- Keep secrets out of the SSH runtime environment unless the client needs them.
-- Prefer outbound-only connectivity from the home host when a public relay is available.
+- TCP forwarding
+- stream-local forwarding
+- agent forwarding
+- X11 forwarding
+- `sftp`
+- arbitrary environment injection
+
+It also does not expose a general shell.
+
+### Runtime Isolation
+
+The board process runs as:
+
+- user: `pxpx`
+- home: `/home/pxpx`
+- workdir: `/home/pxpx`
+
+This is separate from:
+
+- user: `ubuntu`
+- admin shell on port `2222`
+
+### Auth Storage Isolation
+
+Each SSH key fingerprint gets its own auth file tree under the configured auth root.
+
+Without that, every remote user would share a single `github-auth.json`, which would be a serious product and security bug.
+
+## Runtime Configuration
+
+The current gateway is configured entirely by environment variables.
+
+Important ones:
+
+| Variable | Purpose | Default |
+| --- | --- | --- |
+| `PXPX_GATEWAY_HOST` | bind host | `0.0.0.0` |
+| `PXPX_GATEWAY_PORT` | public listen port | `22` |
+| `PXPX_GATEWAY_HOST_KEYS` | SSH host key paths | `/etc/ssh/ssh_host_ed25519_key,/etc/ssh/ssh_host_rsa_key` |
+| `PXPX_GATEWAY_COMMAND` | launched board binary | `/usr/local/bin/pxpx` |
+| `PXPX_GATEWAY_RUN_AS_USER` | runtime Unix user | `pxpx` |
+| `PXPX_GATEWAY_RUN_HOME` | runtime home override | derived |
+| `PXPX_GATEWAY_WORKDIR` | working directory override | derived |
+| `PXPX_GATEWAY_AUTH_ROOT` | per-fingerprint auth root | `<runHome>/.local/share/pxpx-auth` |
+| `PXPX_GATEWAY_RUNNER` | PTY runner path | repo `scripts/ssh-pty-runner.py` |
+| `PXPX_GATEWAY_DEFAULT_ROOM` | default room | `tolluset/pxpx` |
+
+## First Public Deployment
+
+### Platform Choice
+
+The first public host was provisioned on Oracle Cloud Infrastructure in `ap-seoul-1`.
+
+Reasons:
+
+- already available
+- low-cost test path
+- normal VM model
+- public TCP `22` support without special SSH products
+
+### What Actually Landed
+
+- compute shape: `VM.Standard.E2.1.Micro`
+- architecture: x86
+- public IP: ephemeral
+- DNS: apex `A` record to the public IP
+
+### Why The ARM Plan Changed
+
+The original intent was to use Always Free ARM (`A1`) because it is a better long-term free-tier fit. That did not work in practice because the region had no host capacity available at the time.
+
+That forced a fallback to `E2.1.Micro`.
+
+### Why The Network Was Reused
+
+The tenancy was already at the VCN quota, so a new VCN could not be created.
+
+The deployment therefore reused:
+
+- an existing VCN
+- an existing public subnet
+- an existing security list
+
+### Why The IP Was Ephemeral
+
+Reserved public IP quota was already exhausted.
+
+That forced the initial deployment to use an ephemeral public IP. This is acceptable for early operation, but it means DNS must be updated manually if the instance is recreated or the public IP changes.
+
+## System-Level Deployment Shape
+
+### Files On The Host
+
+- project checkout: `~/pxpx`
+- board binary: `/usr/local/bin/pxpx`
+- gateway launcher: `/usr/local/bin/pxpx-ssh-gateway-start`
+- gateway env file: `/etc/default/pxpx-ssh-gateway`
+- gateway service: `pxpx-ssh-gateway.service`
+- SSH socket override: `/etc/systemd/system/ssh.socket.d/10-pxpx-ports.conf`
+
+### Final Port Ownership
+
+- `22/tcp` -> `pxpx-ssh-gateway.service`
+- `2222/tcp` -> system `sshd`
+
+### Why `ssh.socket` Was Used
+
+The Ubuntu image used socket activation for SSH. That means simply editing `sshd_config` is not enough. The active listener is often controlled by `ssh.socket`.
+
+The fix was to move the socket listener itself to `2222`.
+
+## Runbook: How The Host Was Brought Up
+
+This is the implementation sequence that actually worked.
+
+### 1. Create Or Reuse The VM
+
+- create the OCI instance
+- attach a public IP
+- verify `ssh ubuntu@<ip>`
+
+### 2. Clone The Repository And Install Runtime Dependencies
+
+- clone `https://github.com/bhkku/pxpx`
+- install Bun
+- run `bun install`
+- build or install the board binary as `/usr/local/bin/pxpx`
+
+### 3. Create A Dedicated Runtime User
+
+- create Unix user `pxpx`
+- set home directory to `/home/pxpx`
+- keep this user separate from the admin user
+
+### 4. Stage The Custom Gateway On A Non-Public Port
+
+Before taking over port `22`, the gateway was first staged on a spare port and tested end-to-end.
+
+This matters because:
+
+- it validates auth and PTY flow
+- it avoids locking out admin access
+- it allows incremental cutover
+
+### 5. Move Admin SSH To `2222`
+
+- change the active `ssh.socket` listener to `2222`
+- verify `ssh -p 2222 ubuntu@<ip>`
+
+Only after that succeeds should public port `22` be reassigned.
+
+### 6. Move The Gateway To Port `22`
+
+- update the gateway env file to bind to `22`
+- restart the gateway
+- verify `ssh <ip>`
+- verify `ssh -t <ip> facebook/react`
+
+### 7. Point DNS At The Host
+
+- add `A pxpx.sh -> <public-ip>`
+- wait for recursive resolvers to see the record
+
+## Operational Commands
+
+### User Entry
+
+```bash
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
+```
+
+### Admin Entry
+
+```bash
+ssh -p 2222 ubuntu@pxpx.sh
+```
+
+### Service Inspection
+
+```bash
+sudo systemctl status pxpx-ssh-gateway
+sudo systemctl status ssh.socket
+sudo ss -ltnp | grep -E ':(22|2222)\b'
+journalctl -u pxpx-ssh-gateway -f
+```
+
+### Repo Maintenance
+
+```bash
+ssh -p 2222 ubuntu@pxpx.sh
+cd ~/pxpx
+git pull
+bun install
+```
+
+## Troubleshooting Notes From The First Deployment
+
+### Issue: `ssh pxpx.sh` Needed To Work Without `pxpx@`
+
+Cause:
+
+- standard `sshd` binds product routing to a Unix username
+
+Fix:
+
+- replace the public `sshd` entrypoint with a custom gateway that ignores the presented SSH username
+
+### Issue: Interactive Repo Rooms Needed `-t`
+
+Cause:
+
+- SSH `exec` requests do not automatically allocate a PTY
+
+Fix:
+
+- require `-t` for interactive remote commands
+- keep plain shell-style `ssh pxpx.sh` as the no-flag default
+
+### Issue: `2222` Looked Open In OCI But Was Still Unreachable
+
+Cause:
+
+- the guest OS image had local firewall rules that only allowed new inbound traffic on port `22`
+
+Fix:
+
+- add local firewall rules for `2222`
+- persist them
+
+Key insight:
+
+- cloud security rules are only half the story; always check the instance firewall too
+
+### Issue: `pxpx.sh` Resolved In `dig` But Not In `ssh`
+
+Cause:
+
+- local macOS DNS cache still held stale resolver state
+
+Fix:
+
+```bash
+sudo killall -HUP mDNSResponder
+```
+
+Key insight:
+
+- `dig` and `ssh` do not always reflect the same resolver path on macOS
+
+### Issue: OCI Network Creation Failed
+
+Cause:
+
+- tenancy VCN quota was already exhausted
+
+Fix:
+
+- reuse the existing public subnet instead of assuming greenfield infrastructure
+
+Key insight:
+
+- practical deployments often start inside messy pre-existing cloud accounts, not empty ones
+
+### Issue: Always Free ARM Was Unavailable
+
+Cause:
+
+- regional host capacity was exhausted
+
+Fix:
+
+- fall back to another free-tier-compatible shape and keep the deployment moving
+
+Key insight:
+
+- free-tier architecture plans should always include a fallback shape
+
+## Experience And Engineering Insights
+
+### 1. The Product Surface Should Drive The Host Architecture
+
+If the desired command is:
+
+```bash
+ssh pxpx.sh
+```
+
+then the host architecture must be chosen around that fact. A simpler server design that forces `pxpx@` is technically valid but product-invalid.
+
+### 2. SSH Can Be An App Transport, Not Just A Shell Transport
+
+This project worked well once SSH was treated as:
+
+- authentication transport
+- PTY transport
+- command transport
+
+and not as a normal shell session.
+
+That mental shift simplified the model.
+
+### 3. The Right Isolation Boundary Was "Board Process", Not "Full Multi-User Shell"
+
+Trying to model public users as Unix users would have pushed the system toward the wrong shape.
+
+The real requirement was:
+
+- one board process per connection
+- launched as one unprivileged runtime account
+- with app-level identity carried by the SSH key fingerprint
+
+### 4. Process And Port Separation Reduced Risk
+
+Putting:
+
+- public app traffic on `22`
+- admin shell on `2222`
+
+was simpler and safer than trying to overload one daemon with both jobs.
+
+### 5. Per-Fingerprint Auth Storage Was Essential
+
+This was easy to miss. Without it, a hosted multi-user SSH service would accidentally share one GitHub login session across unrelated users.
+
+That would have been a subtle but severe bug.
+
+### 6. The Real Deployment Work Happened Below The App Layer
+
+The core app logic was already mostly ready. The hard parts were:
+
+- socket activation behavior
+- host key reuse
+- firewall rules
+- DNS propagation and local DNS caches
+- cloud quota limits
+
+That is a useful reminder for future hosted features: product work often finishes before infrastructure work does.
+
+## Recommendations For Future Clean-Up
+
+### Short Term
+
+- write a reproducible server bootstrap script instead of relying on ad hoc remote shell steps
+- codify the `systemd` service file in the repository
+- codify the `ssh.socket` override in the repository
+- add a hosted deployment checklist to avoid forgetting the firewall step
+
+### Medium Term
+
+- package the gateway and board binary into a single installable release artifact
+- document upgrade and rollback steps
+- add a smoke-test script that checks:
+  - public `ssh pxpx.sh -- --help`
+  - public `ssh -t pxpx.sh facebook/react`
+  - admin `ssh -p 2222 ubuntu@pxpx.sh`
+
+### Long Term
+
+- support an installation path for users who want to self-host the SSH entrypoint
+- consider a VPS-first deployment story as the default public host recommendation
+- decide whether hosted auth should eventually move beyond local per-fingerprint files
 
 ## Open Questions
 
-- Whether Phase 1 should support only the default room and `owner/repo`, or also named rooms
-- Whether the project should later replace system `sshd` with a custom SSH gateway
-- Whether the public hosted service should run the `pxboard` process on the VPS itself or only use the VPS as a relay
+- Whether the public shared host should remain on OCI or move to a simpler VPS provider
+- Whether the project should later ship a one-command installer for the gateway host
+- Whether the public hosted service should stay on an ephemeral public IP until reserved IP quota is available
+- Whether the public product should eventually offer a web terminal mirror in addition to SSH

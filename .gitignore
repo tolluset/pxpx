@@ -1,8 +1,16 @@
 node_modules/
 .DS_Store
 *.log
+.env
+.env.*
+!.env.example
 .ralph/
+.codex/
+.opencode/
+.pnpm-store/
+.rulesync/
 .wrangler/
+.wrangler-home/
 .agents/
 .oci-venv/
 dist/

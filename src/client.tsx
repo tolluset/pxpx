@@ -164,9 +164,10 @@ const ERASE_LOG_COLOR_ID = "__erase__";
 const CUSTOM_COLOR_INPUT_HOTKEY = "c";
 const HEX_COLOR_LENGTH = 7;
 const MESSAGE_ACCESS = 4;
-const DEFAULT_PLAY_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
-const DEFAULT_AUTH_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
+const DEFAULT_PLAY_SERVER_URL = "ws://127.0.0.1:1234";
+const DEFAULT_AUTH_SERVER_URL = "ws://127.0.0.1:8787";
 const DEFAULT_ROOM_NAME = "pixel-game";
+const DEFAULT_ROOM_ENV_NAME = "PIXEL_DEFAULT_ROOM";
 
 function exitWithError(message: string): never {
   console.error(`Error: ${message}`);
@@ -194,11 +195,11 @@ Options:
   -h, --help            Show this help message
 
 Environment variables:
-  PIXEL_SERVER_URL      Websocket server URL for gameplay (default: wss://pixel-game-collab.dlqud19.workers.dev)
+  PIXEL_SERVER_URL      Websocket server URL for gameplay (default: ws://127.0.0.1:1234)
   PIXEL_ROOM            Shared room name for collaborators (default: pixel-game)
   PIXEL_NAME            Local player label (default: GitHub login or player-xxxx)
   PIXEL_REPO            Repository slug alias for PIXEL_ROOM, for example owner/repo
-  PIXEL_AUTH_SERVER_URL GitHub login worker URL (default: wss://pixel-game-collab.dlqud19.workers.dev)
+  PIXEL_AUTH_SERVER_URL GitHub login worker URL (default: ws://127.0.0.1:8787)
   PIXEL_GITHUB_AUTH_FILE Override the stored GitHub auth session path
 `);
 }
@@ -659,6 +660,8 @@ function resolvePlayRuntimeConfig(cliOptions: CliOptions) {
           ? normalizeRoomName(process.env.PIXEL_ROOM, "PIXEL_ROOM")
           : process.env.PIXEL_REPO !== undefined
             ? normalizeRepoSlug(process.env.PIXEL_REPO, "PIXEL_REPO")
+            : process.env.PIXEL_DEFAULT_ROOM !== undefined
+              ? normalizeRoomName(process.env.PIXEL_DEFAULT_ROOM, DEFAULT_ROOM_ENV_NAME)
             : DEFAULT_ROOM_NAME;
 
   return {

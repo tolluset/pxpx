@@ -1,15 +1,36 @@
 # Pixel Game
 
-Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. The client runs in the terminal and can connect either to a local `y-websocket` server or the Cloudflare Worker in this repository.
+Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. This repository is open source and self-host friendly: it includes the terminal client, a Cloudflare Worker collaboration server, and local build and release scripts.
 
 For a simpler Korean overview for presentations, see [README.ko.md](./README.ko.md).
 
+![Pixel Game terminal screenshot](./docs/assets/readme-terminal-screenshot.png)
+
+## Try It First
+
+The fastest way to understand the project is to join the hosted board from a real terminal:
+
+```bash
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
+ssh -t pxpx.sh torvalds/linux
+```
+
+`ssh pxpx.sh` is the product hook. You can also jump straight into a repository-scoped room with any `owner/repo` slug, such as `torvalds/linux`. The rest of this README explains how to run and self-host the same stack from source.
+
+## Open-source Scope
+
+- Included and supported: terminal client, Cloudflare Worker, local build and release scripts
+- Included as an advanced deployment option: SSH gateway in `src/ssh-gateway.ts`
+- Not part of the open-source compatibility contract: any maintainer-run shared worker or SSH host
+
 ## What It Supports
 
-- Remote-first multiplayer via Cloudflare Worker, with an optional local `y-websocket` server for development
+- Local multiplayer via `y-websocket` for development or self-hosted play
+- Remote multiplayer via the Cloudflare Worker in this repository
 - Room routing by explicit room name or GitHub `owner/repo` slug
-- Live cursors, recent paint activity, short-lived paint highlights, and board growth on the south/east frontier
-- Optional GitHub device login for remote sessions, mainly for identity labels
+- Live cursors, recent paint activity, short-lived paint highlights, and board growth on the south and east frontier
+- Optional GitHub device login for identity labels and protected repository rooms
 - Standalone binary builds and GitHub release packaging
 
 ## Prerequisites
@@ -33,15 +54,21 @@ Install dependencies:
 pnpm install
 ```
 
+Start the local collaboration server:
+
+```bash
+pnpm dev:server
+```
+
 Start the client:
 
 ```bash
 pnpm dev:client
 ```
 
-By default the client connects to `wss://pixel-game-collab.dlqud19.workers.dev` and joins room `pixel-game`. No local server is required.
+By default the source checkout connects to `ws://127.0.0.1:1234` and joins room `pixel-game`.
 
-Useful remote variations:
+Useful local variations:
 
 ```bash
 pnpm dev:client -- facebook/react
@@ -51,11 +78,32 @@ PIXEL_ROOM=design-review pnpm dev:client
 
 Run a second client in another terminal to verify real-time sync.
 
-For local-only development, start the local collaboration server and override the endpoint:
+## Worker-backed Features
+
+Run the Worker locally with Wrangler:
 
 ```bash
-pnpm dev:server
-PIXEL_SERVER_URL=ws://127.0.0.1:1234 pnpm dev:client
+pnpm dev:server:cloudflare
+```
+
+Then point gameplay and login at the local Worker:
+
+```bash
+PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
+PIXEL_AUTH_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client -- login
+```
+
+Deploy your own Worker:
+
+```bash
+pnpm deploy:server:cloudflare
+```
+
+After deployment:
+
+```bash
+PIXEL_SERVER_URL=wss://<your-worker-url> pxboard owner/repo
+PIXEL_AUTH_SERVER_URL=wss://<your-worker-url> pxboard login
 ```
 
 ## Install Options
@@ -64,6 +112,7 @@ Run directly from a checkout:
 
 ```bash
 pnpm install
+pnpm dev:server
 pnpm dev:client
 ```
 
@@ -74,6 +123,8 @@ Install a local binary from this checkout:
 ```
 
 `install.sh` uses `dist/pxboard` if it already exists, otherwise it builds a local binary from source when the checkout has `pnpm`, `bun`, and dependencies available.
+
+The installed binary keeps the same defaults as the source build. Start a local server first or set `PIXEL_SERVER_URL` or `--server-url` to a deployed Worker before running `pxboard`.
 
 Install from GitHub release assets:
 
@@ -112,9 +163,94 @@ pnpm typegen:worker
 pnpm typecheck
 ```
 
+## GitHub Login
+
+Login is optional for open rooms. For repository rooms that have protected mode enabled, the owner and invited editors can paint while everyone else stays read-only.
+
+```bash
+pxboard login
+pxboard whoami
+pxboard logout
+pxboard access status owner/repo
+pxboard access enable owner/repo
+pxboard access grant owner/repo alice
+pxboard access revoke owner/repo alice
+```
+
+If you have a local or deployed Worker, point login at it:
+
+```bash
+pxboard login --server-url ws://127.0.0.1:8787
+PIXEL_AUTH_SERVER_URL=wss://<your-worker-url> pxboard login
+```
+
+If the Worker login flow is unavailable, `pxboard login` can fall back to GitHub's device flow when `PIXEL_GITHUB_CLIENT_ID` or `GITHUB_CLIENT_ID` is set locally.
+
+Successful Worker-backed logins also upsert the GitHub user profile into a server-side Durable Object-backed registry. The Worker still does not store GitHub access tokens.
+
+Repository access management commands require a Worker-backed login because they depend on the Worker-signed session token.
+
+## Cloudflare Worker
+
+This repository includes a Durable Object-backed Yjs collaboration Worker in `cloudflare/worker.ts`.
+
+Repository rooms also support an owner-managed protected mode. When enabled, editing is limited to the repository owner plus the invited editor list stored in the room Durable Object.
+
+If you change `wrangler.toml` bindings, regenerate the Worker runtime declarations before typechecking:
+
+```bash
+pnpm typegen:worker
+```
+
+Run the Worker locally with Wrangler:
+
+```bash
+pnpm dev:server:cloudflare
+```
+
+Then point the client at the local Worker URL printed by Wrangler. A typical local URL is:
+
+```bash
+PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
+PIXEL_AUTH_SERVER_URL=ws://127.0.0.1:8787 pxboard login
+```
+
+Deploy your own Worker:
+
+```bash
+pnpm deploy:server:cloudflare
+```
+
+Authenticate Wrangler with either `pnpm exec wrangler login` or `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`.
+
+To enable Worker-backed GitHub login on your deployment:
+
+```bash
+pnpm exec wrangler secret put GITHUB_CLIENT_ID
+pnpm exec wrangler secret put GITHUB_SESSION_SECRET
+pnpm exec wrangler secret put ROOM_RESET_TOKEN
+```
+
+Then connect clients to the deployed Worker:
+
+```bash
+PIXEL_SERVER_URL=wss://<your-worker-url> pnpm dev:client
+PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
+```
+
+To reset a room back to an empty 16x16 board:
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer $ROOM_RESET_TOKEN" \
+  https://<your-worker-url>/admin/rooms/pixel-game/reset
+```
+
 ## SSH Gateway
 
-The repository also includes a custom SSH gateway for hosted entrypoints such as:
+This repository also includes a custom SSH gateway for hosted entrypoints. It is an advanced deployment option and not required for local development or self-hosting the Worker.
+
+Example hosted entrypoints:
 
 ```bash
 ssh pxpx.sh
@@ -127,13 +263,13 @@ Run it locally on a high port:
 PXPX_GATEWAY_PORT=22222 \
 PXPX_GATEWAY_HOST=127.0.0.1 \
 PXPX_GATEWAY_HOST_KEYS=/tmp/pxpx-hostkey \
-PXPX_GATEWAY_COMMAND=/usr/local/bin/pxpx \
+PXPX_GATEWAY_COMMAND=/usr/local/bin/pxboard \
 PXPX_GATEWAY_RUN_AS_USER=pxpx \
 PXPX_GATEWAY_RUN_HOME=/home/pxpx \
 pnpm dev:ssh-gateway
 ```
 
-The gateway accepts SSH public-key authentication, ignores the presented SSH username, launches only `pxpx`, and stores GitHub auth state by SSH public-key fingerprint via `PIXEL_GITHUB_AUTH_FILE`.
+The gateway accepts SSH public-key authentication, ignores the presented SSH username, launches only the configured board command, and stores GitHub auth state by SSH public-key fingerprint via `PIXEL_GITHUB_AUTH_FILE`.
 
 ## Build And Package
 
@@ -156,94 +292,12 @@ This creates:
 - `artifacts/pxboard-<os>-<arch>.tar.gz`
 - `artifacts/pxboard-<os>-<arch>.tar.gz.sha256`
 
-## GitHub Login
-
-Login is optional for open rooms. For repository rooms that have protected mode enabled, the owner and invited editors can paint while everyone else stays read-only.
-
-```bash
-pxboard login
-pxboard whoami
-pxboard logout
-pxboard access status owner/repo
-pxboard access enable owner/repo
-pxboard access grant owner/repo alice
-pxboard access revoke owner/repo alice
-```
-
-To use your own auth worker:
-
-```bash
-pxboard login --server-url wss://<your-worker-url>
-PIXEL_AUTH_SERVER_URL=wss://<your-worker-url> pxboard login
-```
-
-If the worker login flow is unavailable, `pxboard login` can fall back to GitHub's device flow when `PIXEL_GITHUB_CLIENT_ID` or `GITHUB_CLIENT_ID` is set locally.
-
-Successful worker-backed logins also upsert the GitHub user profile into a server-side Durable Object-backed registry. The worker still does not store GitHub access tokens.
-
-Repository access management commands require a worker-backed login because they depend on the worker-signed session token.
-
-## Cloudflare Worker
-
-This repository includes a Durable Object-backed Yjs collaboration worker in `cloudflare/worker.ts`.
-
-Repository rooms also support an owner-managed protected mode. When enabled, editing is limited to the repository owner plus the invited editor list stored in the room Durable Object.
-
-If you change `wrangler.toml` bindings, regenerate the worker runtime declarations before typechecking:
-
-```bash
-pnpm typegen:worker
-```
-
-Run the worker locally with Wrangler:
-
-```bash
-pnpm dev:server:cloudflare
-```
-
-Then point the client at the local worker URL printed by Wrangler. A typical local URL is:
-
-```bash
-PIXEL_SERVER_URL=ws://127.0.0.1:8787 pnpm dev:client
-```
-
-Deploy your own worker:
-
-```bash
-pnpm deploy:server:cloudflare
-```
-
-Authenticate Wrangler with either `pnpm exec wrangler login` or `CLOUDFLARE_API_TOKEN` plus `CLOUDFLARE_ACCOUNT_ID`.
-
-To enable worker-backed GitHub login on your worker:
-
-```bash
-pnpm exec wrangler secret put GITHUB_CLIENT_ID
-pnpm exec wrangler secret put GITHUB_SESSION_SECRET
-pnpm exec wrangler secret put ROOM_RESET_TOKEN
-```
-
-Then connect clients to the deployed worker:
-
-```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> pnpm dev:client
-PIXEL_SERVER_URL=wss://<your-worker-url> pxboard facebook/react
-```
-
-To reset a room back to an empty 16x16 board:
-
-```bash
-curl -X POST \
-  -H "Authorization: Bearer $ROOM_RESET_TOKEN" \
-  https://<your-worker-url>/admin/rooms/pixel-game/reset
-```
-
 ## Environment Variables
 
 | Variable | Purpose | Default |
 | --- | --- | --- |
-| `PIXEL_SERVER_URL` | Gameplay websocket server URL | `wss://pixel-game-collab.dlqud19.workers.dev` |
-| `PIXEL_AUTH_SERVER_URL` | GitHub login worker URL | `wss://pixel-game-collab.dlqud19.workers.dev` |
+| `PIXEL_SERVER_URL` | Gameplay websocket server URL | `ws://127.0.0.1:1234` |
+| `PIXEL_AUTH_SERVER_URL` | GitHub login worker URL | `ws://127.0.0.1:8787` |
 | `PIXEL_ROOM` | Explicit room name | `pixel-game` |
 | `PIXEL_REPO` | Repository slug alias for the room | none |
 | `PIXEL_NAME` | Player label override | stored GitHub login or random `player-xxxx` |
@@ -273,11 +327,17 @@ Room selection precedence:
 
 Painting or pushing beyond the south or east edge grows the shared board by `8` cells in that direction.
 
+## Community
+
+- [Contributing guide](./CONTRIBUTING.md)
+- [Code of conduct](./CODE_OF_CONDUCT.md)
+- [Security policy](./SECURITY.md)
+
 ## Related Docs
 
 - [Client distribution notes](docs/2026-03-07-client-distribution.md)
 - [Cloudflare server notes](docs/2026-03-07-cloudflare-server.md)
 - [GitHub login notes](docs/2026-03-07-github-login.md)
 - [Repository access control notes](docs/2026-03-08-repo-access-control.md)
-- [SSH gateway spec](docs/2026-03-08-ssh-gateway-spec.md)
+- [SSH gateway architecture and deployment notes](docs/2026-03-08-ssh-gateway-spec.md)
 - [Project plan](docs/2026-03-07-pixel-game-plan.md)

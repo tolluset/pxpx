@@ -45,10 +45,10 @@ If you want authenticated room reset support, also set:
 
 ## Client Configuration
 
-After deployment, clients can use the worker directly because the client default is the deployed worker URL:
+After deployment, clients can opt into the Worker explicitly:
 
 ```bash
-pnpm dev:client
+PIXEL_SERVER_URL=wss://<worker-url> pnpm dev:client
 ```
 
 Repository-based routing is supported at runtime:
@@ -90,12 +90,8 @@ pnpm dev:server
 PIXEL_SERVER_URL=ws://127.0.0.1:1234 pnpm dev:client
 ```
 
-## Current Default
+## Public Repo Default
 
-The shared gameplay default is the deployed worker:
+The open-source repository no longer hardcodes a maintainer-run Worker URL. A source checkout defaults to the local `y-websocket` server, and self-hosted Worker usage is opt-in via `PIXEL_SERVER_URL` and `PIXEL_AUTH_SERVER_URL`.
 
-```bash
-wss://pixel-game-collab.dlqud19.workers.dev
-```
-
-Guest sessions can paint without logging in, and successful worker-backed logins are recorded in the GitHub user registry Durable Object.
+Guest sessions can paint without logging in, and successful Worker-backed logins are recorded in the GitHub user registry Durable Object.
