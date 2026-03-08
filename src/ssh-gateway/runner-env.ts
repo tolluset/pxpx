@@ -3,8 +3,15 @@ import type { SpawnOptions } from "node:child_process";
 import type { GatewayConfig } from "./config";
 import type { AuthIdentity, UserAccount } from "./types";
 
+function readOptionalProcessEnv(name: string) {
+  const value = process.env[name];
+  return typeof value === "string" && value.trim().length > 0 ? value : undefined;
+}
+
 export function buildRunnerEnvironment(config: GatewayConfig, identity: AuthIdentity, account: UserAccount, term: string) {
   const authFilePath = path.join(config.authRoot, `${identity.fingerprint}.json`);
+  const playServerUrl = readOptionalProcessEnv("PIXEL_SERVER_URL");
+  const authServerUrl = readOptionalProcessEnv("PIXEL_AUTH_SERVER_URL");
 
   return {
     HOME: account.home,
@@ -20,6 +27,8 @@ export function buildRunnerEnvironment(config: GatewayConfig, identity: AuthIden
     PXPX_SSH_KEY_FINGERPRINT: identity.fingerprint,
     PXPX_SSH_USERNAME: identity.sshUsername,
     PIXEL_DEFAULT_ROOM: config.defaultRoom,
+    ...(playServerUrl ? { PIXEL_SERVER_URL: playServerUrl } : {}),
+    ...(authServerUrl ? { PIXEL_AUTH_SERVER_URL: authServerUrl } : {}),
   };
 }
 
