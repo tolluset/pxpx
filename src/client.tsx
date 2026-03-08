@@ -1880,7 +1880,12 @@ function App() {
         const nextPaints = { ...previous };
 
         validKeys.forEach((key) => {
-          nextPaints[key] = timestamp;
+          if (snapshot[key]) {
+            nextPaints[key] = timestamp;
+            return;
+          }
+
+          delete nextPaints[key];
         });
 
         return nextPaints;
