@@ -273,7 +273,7 @@ Each service should expose Effect-returning methods and hide Node callback/event
 - [x] `src/ssh-gateway/account.ts`: UID/GID lookup and run-user model
 - [x] `src/ssh-gateway/control-channel.ts`: socket lifecycle
 - [x] `src/ssh-gateway/child-process.ts`: spawn, bridge, teardown
-- [ ] `src/ssh-gateway/session.ts`: per-session orchestration
+- [x] `src/ssh-gateway/session.ts`: per-session orchestration
 - [x] `src/ssh-gateway/server.ts`: ssh2 server boot/listen lifecycle
 
 ### Suggested Verification Matrix

@@ -1,9 +1,9 @@
 import { Effect } from "effect";
 import { Server, type AuthContext, type ExecInfo, type PseudoTtyInfo } from "ssh2";
 import { buildIdentity, parsePresentedPublicKey, verifyPublicKey } from "./auth";
-import { handleExecution } from "./child-process";
 import { logGateway } from "./logger";
-import type { AuthIdentity, ExecutionHandle, GatewayRuntime } from "./types";
+import { attachSessionHandlers } from "./session";
+import type { AuthIdentity, GatewayRuntime } from "./types";
 
 export function createGatewayServer({ config, hostKeys, runAccount }: GatewayRuntime) {
   return new Server(
@@ -53,75 +53,7 @@ export function createGatewayServer({ config, hostKeys, runAccount }: GatewayRun
             sshUsername: sessionIdentity.sshUsername,
           });
 
-          client.on("request", (_accept, reject) => {
-            reject?.();
-          });
-
-          client.on("tcpip", (_accept, reject) => {
-            reject();
-          });
-
-          client.on("openssh.streamlocal", (_accept, reject) => {
-            reject();
-          });
-
-          client.on("session", (accept) => {
-            const session = accept();
-            let ptyInfo: PseudoTtyInfo | null = null;
-            let execution: ExecutionHandle = {
-              updateWindow: (_rows: number, _cols: number) => {},
-            };
-
-            session.on("pty", (sessionAccept, _reject, info) => {
-              ptyInfo = info;
-              sessionAccept?.();
-            });
-
-            session.on("window-change", (sessionAccept, _reject, info) => {
-              ptyInfo = {
-                ...(ptyInfo ?? {
-                  term: "xterm-256color",
-                  modes: {},
-                  width: info.width,
-                  height: info.height,
-                  rows: info.rows,
-                  cols: info.cols,
-                }),
-                width: info.width,
-                height: info.height,
-                rows: info.rows,
-                cols: info.cols,
-              };
-              execution.updateWindow(info.rows, info.cols);
-              sessionAccept?.();
-            });
-
-            session.on("env", (_sessionAccept, sessionReject) => {
-              sessionReject?.();
-            });
-
-            session.on("auth-agent", (_sessionAccept, sessionReject) => {
-              sessionReject?.();
-            });
-
-            session.on("x11", (_sessionAccept, sessionReject) => {
-              sessionReject?.();
-            });
-
-            session.on("sftp", (_sessionAccept, sessionReject) => {
-              sessionReject?.();
-            });
-
-            session.on("shell", (sessionAccept) => {
-              const channel = sessionAccept();
-              execution = handleExecution(config, channel, sessionIdentity, runAccount, undefined, ptyInfo);
-            });
-
-            session.on("exec", (sessionAccept, _sessionReject, info: ExecInfo) => {
-              const channel = sessionAccept();
-              execution = handleExecution(config, channel, sessionIdentity, runAccount, info.command, ptyInfo);
-            });
-          });
+          attachSessionHandlers(client, config, sessionIdentity, runAccount);
         })
         .on("close", () => {
           if (!identity) {

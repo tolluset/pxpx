@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { Effect, Exit, Scope } from "effect";
 import { resolveCommandPlan } from "./command-plan";
 import type { GatewayConfig } from "./config";
 import { formatGatewayError } from "./errors";
-import { createControlChannel } from "./control-channel";
+import { acquireControlChannel } from "./control-channel";
 import { buildRunnerEnvironment, buildSpawnOptions } from "./runner-env";
 import type { AuthIdentity, CommandPlan, ExecutionHandle, PtyState, UserAccount } from "./types";
 import type { PseudoTtyInfo, ServerChannel } from "ssh2";
@@ -88,7 +89,8 @@ export function launchInteractiveCommand(
   ptyInfo: PseudoTtyInfo,
 ): ExecutionHandle {
   const env = buildRunnerEnvironment(config, identity, account, (ptyInfo as PtyState).term ?? "xterm-256color");
-  const control = createControlChannel(ptyInfo.rows, ptyInfo.cols);
+  const scope = Effect.runSync(Scope.make());
+  const control = Effect.runSync(Scope.extend(acquireControlChannel(ptyInfo.rows, ptyInfo.cols), scope));
   const runnerArgs = [
     config.runner,
     "--rows",
@@ -115,7 +117,7 @@ export function launchInteractiveCommand(
   }) as ChildProcessWithoutNullStreams;
 
   bridgeStreams(channel, runner, () => {
-    control.close();
+    void Effect.runFork(Scope.close(scope, Exit.void));
   });
 
   return {
