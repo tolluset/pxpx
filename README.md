@@ -200,8 +200,6 @@ This repository includes a Durable Object-backed Yjs collaboration Worker in `cl
 
 Repository rooms also support an owner-managed protected mode. When enabled, editing is limited to the repository owner plus the invited editor list stored in the room Durable Object.
 
-Empty repository rooms also get a one-time decorative starter layout on first websocket join. Existing rooms with user data are left unchanged.
-
 If you change `wrangler.toml` bindings, regenerate the Worker runtime declarations before typechecking:
 
 ```bash

@@ -61,8 +61,6 @@ PIXEL_REPO=owner/repo pnpm dev:client
 
 Manual room selection continues to work with `--room` or `PIXEL_ROOM`. The Worker preserves slash-separated room names such as `owner/repo`.
 
-Empty repository rooms receive a one-time decorative starter layout on first websocket join. Repository rooms that already contain user data are left untouched.
-
 GitHub login uses the same Worker host by default:
 
 ```bash

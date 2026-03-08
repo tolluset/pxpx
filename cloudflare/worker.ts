@@ -8,14 +8,10 @@ import { FAVICON_SVG, getFaviconIcoBytes } from "./favicon";
 
 const DOC_STATE_KEY = "doc-state";
 const ROOM_ACCESS_POLICY_KEY = "room-access-policy";
-const ROOM_DECORATION_VERSION_KEY = "room-decoration-version";
 const INITIAL_BOARD_WIDTH = 16;
 const INITIAL_BOARD_HEIGHT = 16;
 const MAX_PAINT_LOG_ENTRIES = 200;
 const MAX_API_COORDINATE = 4095;
-const REPOSITORY_ROOM_DECORATION_VERSION = 3;
-const REPOSITORY_ROOM_DECORATION_BOARD_WIDTH = 24;
-const REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT = 16;
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const MESSAGE_ACCESS = 4;
@@ -31,7 +27,6 @@ const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_LOGIN_SCOPE = "read:user";
 const GITHUB_SESSION_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const PALETTE_COLOR_IDS = new Set(["rose", "amber", "lime", "emerald", "sky", "violet", "pink", "slate"]);
-const DECORATION_COLOR_IDS = ["rose", "amber", "lime", "emerald", "sky", "violet", "pink"];
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -145,12 +140,6 @@ type AwarenessUpdateEvent = {
   added: number[];
   updated: number[];
   removed: number[];
-};
-
-type DecorationCell = {
-  x: number;
-  y: number;
-  color: string;
 };
 
 function getRoomName(pathname: string) {
@@ -531,140 +520,6 @@ function createPaintLogEntry(options: {
     playerName: options.playerName,
     githubLogin: options.githubLogin,
   };
-}
-
-function hashString(value: string) {
-  let hash = 2166136261;
-
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= value.charCodeAt(index);
-    hash = Math.imul(hash, 16777619);
-  }
-
-  return hash >>> 0;
-}
-
-function pickDecorationColors(repositoryRoom: RepositoryRoom) {
-  const hash = hashString(repositoryRoom.repoSlug);
-  const colors: string[] = [];
-
-  for (let index = 0; colors.length < 3; index += 1) {
-    const color = DECORATION_COLOR_IDS[(hash + index * 3) % DECORATION_COLOR_IDS.length];
-
-    if (!colors.includes(color)) {
-      colors.push(color);
-    }
-  }
-
-  return {
-    primary: colors[0],
-    secondary: colors[1],
-    accent: colors[2],
-    neutral: "slate",
-  };
-}
-
-function pushDecorationCells(
-  cells: DecorationCell[],
-  originX: number,
-  originY: number,
-  points: Array<[number, number]>,
-  color: string,
-  options: { mirrorX?: boolean; mirrorY?: boolean } = {},
-) {
-  for (const [rawX, rawY] of points) {
-    cells.push({
-      x: options.mirrorX ? originX - rawX : originX + rawX,
-      y: options.mirrorY ? originY - rawY : originY + rawY,
-      color,
-    });
-  }
-}
-
-function createRepositoryDecorationCells(repositoryRoom: RepositoryRoom) {
-  const cells: DecorationCell[] = [];
-  const { primary, secondary, accent, neutral } = pickDecorationColors(repositoryRoom);
-  const hash = hashString(repositoryRoom.repoSlug);
-  const slashYOffset = hash % 3;
-  const sparkleOffset = hash % 5;
-  const cornerFramePoints: Array<[number, number]> = [
-    [0, 0],
-    [1, 0],
-    [0, 1],
-  ];
-  const cornerAccentPoints: Array<[number, number]> = [[1, 1]];
-  const slashPoints: Array<[number, number]> = [
-    [0, 2],
-    [1, 1],
-    [2, 0],
-    [3, 1],
-    [4, 2],
-  ];
-  const shadowPoints: Array<[number, number]> = [
-    [0, 3],
-    [4, 3],
-  ];
-  const sparkles: Array<[number, number]> = [
-    [7 + sparkleOffset, 3],
-    [15, 2 + slashYOffset],
-    [17 - sparkleOffset, 12],
-  ];
-
-  pushDecorationCells(cells, 2, 2, cornerFramePoints, primary);
-  pushDecorationCells(cells, 2, 2, cornerAccentPoints, accent);
-  pushDecorationCells(cells, REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3, 2, cornerFramePoints, secondary, {
-    mirrorX: true,
-  });
-  pushDecorationCells(cells, REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3, 2, cornerAccentPoints, accent, {
-    mirrorX: true,
-  });
-  pushDecorationCells(cells, 2, REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3, cornerFramePoints, secondary, {
-    mirrorY: true,
-  });
-  pushDecorationCells(cells, 2, REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3, cornerAccentPoints, accent, {
-    mirrorY: true,
-  });
-  pushDecorationCells(
-    cells,
-    REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3,
-    REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3,
-    cornerFramePoints,
-    primary,
-    {
-      mirrorX: true,
-      mirrorY: true,
-    },
-  );
-  pushDecorationCells(
-    cells,
-    REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3,
-    REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3,
-    cornerAccentPoints,
-    accent,
-    {
-      mirrorX: true,
-      mirrorY: true,
-    },
-  );
-  pushDecorationCells(cells, 10, 6 + slashYOffset, slashPoints, accent);
-  pushDecorationCells(cells, 10, 6 + slashYOffset, shadowPoints, neutral);
-
-  for (const [x, y] of sparkles) {
-    cells.push({
-      x,
-      y,
-      color: (x + y + hash) % 2 === 0 ? primary : secondary,
-    });
-  }
-
-  return cells.filter(
-    (cell, index, source) =>
-      cell.x >= 0 &&
-      cell.y >= 0 &&
-      cell.x < REPOSITORY_ROOM_DECORATION_BOARD_WIDTH &&
-      cell.y < REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT &&
-      source.findIndex((candidate) => candidate.x === cell.x && candidate.y === cell.y) === index,
-  );
 }
 
 function normalizeGithubUser(value: unknown): GithubUser | null {
@@ -1741,53 +1596,8 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
       return;
     }
 
-    const repositoryRoom = parseRepositoryRoomName(roomName);
-
-    if (!repositoryRoom) {
-      this.decorationChecked = true;
-      return;
-    }
-
-    await this.ctx.blockConcurrencyWhile(async () => {
-      if (this.decorationChecked) {
-        return;
-      }
-
-      const storedVersion = readNumber(await this.ctx.storage.get<number>(ROOM_DECORATION_VERSION_KEY));
-
-      if (storedVersion === REPOSITORY_ROOM_DECORATION_VERSION) {
-        this.decorationChecked = true;
-        return;
-      }
-
-      const boardMap = this.doc.getMap<number>("board");
-      const pixelsMap = this.doc.getMap<string>("pixels");
-      const paintLogArray = this.doc.getArray<unknown>("paintLog");
-      const boardWidth = readNumber(boardMap.get("width")) ?? INITIAL_BOARD_WIDTH;
-      const boardHeight = readNumber(boardMap.get("height")) ?? INITIAL_BOARD_HEIGHT;
-      const hasUserState = pixelsMap.size > 0 || paintLogArray.length > 0 || boardWidth > INITIAL_BOARD_WIDTH || boardHeight > INITIAL_BOARD_HEIGHT;
-
-      if (hasUserState) {
-        await this.ctx.storage.put(ROOM_DECORATION_VERSION_KEY, REPOSITORY_ROOM_DECORATION_VERSION);
-        this.decorationChecked = true;
-        return;
-      }
-
-      const decorationCells = createRepositoryDecorationCells(repositoryRoom);
-
-      this.doc.transact(() => {
-        boardMap.set("width", REPOSITORY_ROOM_DECORATION_BOARD_WIDTH);
-        boardMap.set("height", REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT);
-
-        for (const cell of decorationCells) {
-          pixelsMap.set(`${cell.x},${cell.y}`, cell.color);
-        }
-      });
-
-      await this.persistDocState();
-      await this.ctx.storage.put(ROOM_DECORATION_VERSION_KEY, REPOSITORY_ROOM_DECORATION_VERSION);
-      this.decorationChecked = true;
-    });
+    void roomName;
+    this.decorationChecked = true;
   }
 
   private async paintPixel(
