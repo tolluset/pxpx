@@ -40,6 +40,7 @@
 - Added automatic fallback room detection from the current checkout's GitHub `origin` remote.
 - Added worker-verified GitHub edit gating so guests can watch but not paint.
 - Added a synced paint activity log rendered in the right panel.
+- Added owner-managed repository protected mode with invited-editor allowlists and read-only fallback for unauthorized users.
 
 ## Engagement Follow-Up
 

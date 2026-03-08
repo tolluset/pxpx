@@ -11,7 +11,10 @@
     "build:client": "bash scripts/build-client.sh",
     "package:client:release": "bash scripts/package-release.sh",
     "deploy:server:cloudflare": "wrangler deploy",
-    "typecheck": "tsc --noEmit"
+    "typegen:worker": "wrangler types worker-configuration.d.ts",
+    "typecheck:client": "tsc --noEmit",
+    "typecheck:worker": "tsc --noEmit -p tsconfig.worker.json",
+    "typecheck": "pnpm typecheck:client && pnpm typecheck:worker"
   },
   "dependencies": {
     "@opentui/core": "^0.1.86",

@@ -66,10 +66,18 @@ type PaintLogEntry = {
   githubLogin?: string;
 };
 
+type EditAccessMode = "open" | "owner_allowlist";
+type EditAccessRole = "open" | "owner" | "editor" | "viewer";
+
 type EditAccessState = {
   resolved: boolean;
   canEdit: boolean;
   reason: string;
+  accessMode: EditAccessMode;
+  role: EditAccessRole;
+  ownerLogin?: string;
+  repoSlug?: string;
+  collaboratorCount: number;
 };
 
 type AwarenessUser = {
@@ -104,16 +112,32 @@ type RemoteCursorLabel = {
   top: number;
 };
 
-type CliCommand = "play" | "login" | "logout" | "whoami";
+type AccessCommand = "status" | "enable" | "disable" | "grant" | "revoke";
+type CliCommand = "play" | "login" | "logout" | "whoami" | "access";
 
 type CliOptions = {
   command: CliCommand;
   help: boolean;
+  accessAction?: AccessCommand;
+  accessLogin?: string;
   name?: string;
   positionalRepo?: string;
   repo?: string;
   room?: string;
   serverUrl?: string;
+};
+
+type RepositoryAccessApiResponse = {
+  ok: boolean;
+  roomName: string;
+  repoSlug: string;
+  ownerLogin: string;
+  mode: EditAccessMode;
+  editors: string[];
+  collaboratorCount: number;
+  requesterLogin: string;
+  action?: string;
+  editor?: string;
 };
 
 const INITIAL_BOARD_WIDTH = 16;
@@ -138,7 +162,7 @@ const MAX_PAINT_LOG_ENTRIES = 200;
 const MAX_VISIBLE_PAINT_LOGS = 10;
 const ERASE_LOG_COLOR_ID = "__erase__";
 const MESSAGE_ACCESS = 4;
-const DEFAULT_PLAY_SERVER_URL = "ws://127.0.0.1:1234";
+const DEFAULT_PLAY_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
 const DEFAULT_AUTH_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
 const DEFAULT_ROOM_NAME = "pixel-game";
 
@@ -154,6 +178,11 @@ function printUsage() {
   pxboard login [--server-url <url>]
   pxboard logout
   pxboard whoami
+  pxboard access status [owner/repo] [--server-url <url>]
+  pxboard access enable [owner/repo] [--server-url <url>]
+  pxboard access disable [owner/repo] [--server-url <url>]
+  pxboard access grant [owner/repo] <github-login> [--server-url <url>]
+  pxboard access revoke [owner/repo] <github-login> [--server-url <url>]
 
 Options:
   --repo <owner/repo>   Alias for the positional repository selector
@@ -163,7 +192,7 @@ Options:
   -h, --help            Show this help message
 
 Environment variables:
-  PIXEL_SERVER_URL      Websocket server URL for gameplay (default: ws://127.0.0.1:1234)
+  PIXEL_SERVER_URL      Websocket server URL for gameplay (default: wss://pixel-game-collab.dlqud19.workers.dev)
   PIXEL_ROOM            Shared room name for collaborators (default: pixel-game)
   PIXEL_NAME            Local player label (default: GitHub login or player-xxxx)
   PIXEL_REPO            Repository slug alias for PIXEL_ROOM, for example owner/repo
@@ -187,16 +216,37 @@ function parseCliOptions(args: string[]) {
     help: false,
   };
 
-  for (let index = 0; index < args.length; index += 1) {
-    const argument = args[index];
+  let index = 0;
+
+  if (args[0] === "login" || args[0] === "logout" || args[0] === "whoami") {
+    options.command = args[0];
+    index = 1;
+  } else if (args[0] === "access") {
+    const accessAction = args[1];
+
+    if (accessAction === undefined || accessAction === "-h" || accessAction === "--help") {
+      options.command = "access";
+      options.help = true;
+      return options;
+    }
 
     if (
-      index === 0 &&
-      (argument === "login" || argument === "logout" || argument === "whoami")
+      accessAction !== "status" &&
+      accessAction !== "enable" &&
+      accessAction !== "disable" &&
+      accessAction !== "grant" &&
+      accessAction !== "revoke"
     ) {
-      options.command = argument;
-      continue;
+      exitWithError("access requires one of: status, enable, disable, grant, revoke");
     }
+
+    options.command = "access";
+    options.accessAction = accessAction;
+    index = 2;
+  }
+
+  for (; index < args.length; index += 1) {
+    const argument = args[index];
 
     switch (argument) {
       case "--repo":
@@ -222,6 +272,23 @@ function parseCliOptions(args: string[]) {
       default:
         if (argument.startsWith("-")) {
           exitWithError(`unknown argument: ${argument}`);
+        }
+
+        if (options.command === "access") {
+          if (options.positionalRepo === undefined) {
+            options.positionalRepo = argument;
+            continue;
+          }
+
+          if (
+            (options.accessAction === "grant" || options.accessAction === "revoke") &&
+            options.accessLogin === undefined
+          ) {
+            options.accessLogin = argument;
+            continue;
+          }
+
+          exitWithError(`unexpected argument: ${argument}`);
         }
 
         if (options.command !== "play") {
@@ -263,6 +330,21 @@ function parseCliOptions(args: string[]) {
       options.serverUrl !== undefined)
   ) {
     exitWithError(`${options.command} does not accept board options`);
+  }
+
+  if (
+    options.command === "access" &&
+    (options.room !== undefined || options.name !== undefined)
+  ) {
+    exitWithError("access only supports repository selectors, --server-url, and --help");
+  }
+
+  if (
+    options.command === "access" &&
+    (options.accessAction === "grant" || options.accessAction === "revoke") &&
+    options.accessLogin === undefined
+  ) {
+    exitWithError(`${options.accessAction} requires a GitHub login`);
   }
 
   return options;
@@ -317,12 +399,218 @@ function normalizeRepoSlug(value: string, source: string) {
   return normalized;
 }
 
+function normalizeGithubHandle(value: string, source: string) {
+  const normalized = value.trim().replace(/^@/, "").toLowerCase();
+
+  if (!/^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i.test(normalized)) {
+    exitWithError(`${source} must be a valid GitHub login`);
+  }
+
+  return normalized;
+}
+
+function normalizeAccessMode(value: unknown): EditAccessMode {
+  return value === "owner_allowlist" ? "owner_allowlist" : "open";
+}
+
+function normalizeAccessRole(value: unknown, canEdit: boolean): EditAccessRole {
+  if (value === "owner" || value === "editor" || value === "viewer" || value === "open") {
+    return value;
+  }
+
+  return canEdit ? "open" : "viewer";
+}
+
 function createInitialEditAccessState(): EditAccessState {
   return {
-    resolved: true,
-    canEdit: true,
-    reason: "",
+    resolved: false,
+    canEdit: false,
+    reason: "Checking edit access...",
+    accessMode: "open",
+    role: "open",
+    collaboratorCount: 0,
   };
+}
+
+function extractErrorMessage(payload: unknown, fallback: string) {
+  if (!isRecord(payload)) {
+    return fallback;
+  }
+
+  const message = readOptionalString(payload.error);
+  const description = readOptionalString(payload.description);
+
+  return message ?? description ?? fallback;
+}
+
+async function readJsonResponse(response: Response, sourceName: string) {
+  const text = await response.text();
+
+  if (text.trim().length === 0) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    throw new Error(`${sourceName} returned a non-JSON response with status ${response.status}.`);
+  }
+}
+
+function normalizeStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+}
+
+function normalizeRepositoryAccessResponse(payload: unknown): RepositoryAccessApiResponse {
+  if (!isRecord(payload)) {
+    throw new Error("Access server response was invalid.");
+  }
+
+  const repoSlug = readOptionalString(payload.repoSlug);
+  const roomName = readOptionalString(payload.roomName);
+  const ownerLogin = readOptionalString(payload.ownerLogin);
+  const requesterLogin = readOptionalString(payload.requesterLogin);
+
+  if (!repoSlug || !roomName || !ownerLogin || !requesterLogin) {
+    throw new Error("Access server response was missing required fields.");
+  }
+
+  return {
+    ok: payload.ok === true,
+    roomName,
+    repoSlug,
+    ownerLogin,
+    mode: normalizeAccessMode(payload.mode),
+    editors: normalizeStringArray(payload.editors),
+    collaboratorCount: readInteger(payload.collaboratorCount) ?? 0,
+    requesterLogin,
+    action: readOptionalString(payload.action) ?? undefined,
+    editor: readOptionalString(payload.editor) ?? undefined,
+  };
+}
+
+function describeAccessMode(mode: EditAccessMode) {
+  return mode === "owner_allowlist" ? "protected" : "open";
+}
+
+function formatEditors(editors: string[]) {
+  return editors.length === 0 ? "(none)" : editors.map((editor) => `@${editor}`).join(", ");
+}
+
+function printRepositoryAccessSummary(result: RepositoryAccessApiResponse) {
+  console.log(`Repository: ${result.repoSlug}`);
+  console.log(`Owner: @${result.ownerLogin}`);
+  console.log(`Mode: ${describeAccessMode(result.mode)}`);
+  console.log(`Editors: ${formatEditors(result.editors)}`);
+}
+
+async function requestRepositoryAccess(
+  url: string,
+  sessionToken: string,
+  init: RequestInit = {},
+): Promise<RepositoryAccessApiResponse> {
+  const headers = new Headers(init.headers);
+
+  headers.set("Accept", "application/json");
+  headers.set("Authorization", `Bearer ${sessionToken}`);
+
+  if (init.body !== undefined) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  const response = await fetch(url, {
+    ...init,
+    headers,
+  });
+  const payload = await readJsonResponse(response, "Access server");
+
+  if (!response.ok) {
+    throw new Error(extractErrorMessage(payload, `Access request failed with status ${response.status}.`));
+  }
+
+  return normalizeRepositoryAccessResponse(payload);
+}
+
+function getEditStatusText(editAccess: EditAccessState) {
+  if (!editAccess.resolved) {
+    return "Edit access: checking";
+  }
+
+  if (editAccess.role === "owner") {
+    return "Edit access: owner";
+  }
+
+  if (editAccess.role === "editor") {
+    return "Edit access: invited";
+  }
+
+  if (!editAccess.canEdit) {
+    return "Edit access: read-only";
+  }
+
+  return editAccess.accessMode === "open" ? "Edit access: open" : "Edit access: enabled";
+}
+
+function getEditHintText(editAccess: EditAccessState, githubSession: GithubAuthSession | null) {
+  if (!editAccess.resolved) {
+    return "Waiting for access info";
+  }
+
+  if (editAccess.role === "owner") {
+    if (editAccess.accessMode === "owner_allowlist") {
+      return editAccess.collaboratorCount === 0
+        ? "Protected: no editors"
+        : `Protected: ${editAccess.collaboratorCount} editors`;
+    }
+
+    return "Run `pxboard access enable`";
+  }
+
+  if (editAccess.role === "editor") {
+    return editAccess.ownerLogin ? `Invited by @${editAccess.ownerLogin}` : "Owner granted access";
+  }
+
+  if (editAccess.canEdit) {
+    return githubSession ? "GitHub identity connected" : "Guests can paint";
+  }
+
+  return editAccess.reason;
+}
+
+function getFooterAccessText(editAccess: EditAccessState) {
+  if (!editAccess.resolved) {
+    return "Checking edit access";
+  }
+
+  if (editAccess.role === "owner") {
+    return editAccess.accessMode === "owner_allowlist"
+      ? `Protected | ${editAccess.collaboratorCount} editors`
+      : "Open room | Run access enable";
+  }
+
+  if (editAccess.role === "editor") {
+    return "Invited editor | Live presence";
+  }
+
+  if (editAccess.canEdit) {
+    return "Open room | Live presence | Frontier growth";
+  }
+
+  return editAccess.reason;
+}
+
+function getOwnerAccessMessage(editAccess: EditAccessState) {
+  if (editAccess.role !== "owner" || !editAccess.repoSlug) {
+    return null;
+  }
+
+  if (editAccess.accessMode === "owner_allowlist") {
+    return editAccess.collaboratorCount === 0
+      ? `Protected mode is on for ${editAccess.repoSlug}. Invite an editor with \`pxboard access grant ${editAccess.repoSlug} <github-login>\`.`
+      : `Protected mode is on for ${editAccess.repoSlug}. Review editors with \`pxboard access status ${editAccess.repoSlug}\`.`;
+  }
+
+  return `You own ${editAccess.repoSlug}. Run \`pxboard access enable ${editAccess.repoSlug}\` to limit editing to you and invited collaborators.`;
 }
 
 function resolveRuntimeValue(cliValue: string | undefined, envValue: string | undefined) {
@@ -387,6 +675,31 @@ function getLoginAuthServerUrl(cliOptions: CliOptions) {
     resolveRuntimeValue(cliOptions.serverUrl, process.env.PIXEL_AUTH_SERVER_URL) ?? DEFAULT_AUTH_SERVER_URL;
 
   return getAuthServerUrl(serverUrl);
+}
+
+function resolveAccessRuntimeConfig(cliOptions: CliOptions) {
+  const githubSession = readStoredGithubSession();
+  const sessionToken = getGithubSessionAuthToken(githubSession);
+  const repoSelector = cliOptions.positionalRepo ?? cliOptions.repo ?? process.env.PIXEL_REPO;
+
+  if (!repoSelector) {
+    exitWithError("access requires owner/repo or PIXEL_REPO");
+  }
+
+  if (!githubSession) {
+    exitWithError("run `pxboard login` before managing repository access");
+  }
+
+  if (!sessionToken) {
+    exitWithError("stored GitHub login is not linked to this worker. Run `pxboard login` against the worker again.");
+  }
+
+  return {
+    authServerUrl: getLoginAuthServerUrl(cliOptions),
+    githubLogin: githubSession.user.login,
+    repoSlug: normalizeRepoSlug(repoSelector, cliOptions.positionalRepo !== undefined ? "owner/repo" : "--repo"),
+    sessionToken,
+  };
 }
 
 function getConnectionLabel(connectionStatus: string) {
@@ -459,6 +772,70 @@ function runGithubWhoAmICommand() {
   console.log(`Storage: ${getGithubAuthFilePath()}`);
 }
 
+async function runAccessCommand(cliOptions: CliOptions) {
+  if (!cliOptions.accessAction) {
+    exitWithError("access requires a subcommand");
+  }
+
+  const runtime = resolveAccessRuntimeConfig(cliOptions);
+  const baseUrl = `${runtime.authServerUrl}/admin/rooms/${encodeURIComponent(runtime.repoSlug)}/access`;
+
+  switch (cliOptions.accessAction) {
+    case "status": {
+      const result = await requestRepositoryAccess(baseUrl, runtime.sessionToken);
+      printRepositoryAccessSummary(result);
+      return;
+    }
+    case "enable": {
+      const result = await requestRepositoryAccess(baseUrl, runtime.sessionToken, {
+        method: "PUT",
+        body: JSON.stringify({ mode: "owner_allowlist" }),
+      });
+      console.log(`Protected mode enabled for ${result.repoSlug}.`);
+      printRepositoryAccessSummary(result);
+      return;
+    }
+    case "disable": {
+      const result = await requestRepositoryAccess(baseUrl, runtime.sessionToken, {
+        method: "PUT",
+        body: JSON.stringify({ mode: "open" }),
+      });
+      console.log(`Protected mode disabled for ${result.repoSlug}.`);
+      printRepositoryAccessSummary(result);
+      return;
+    }
+    case "grant": {
+      const githubLogin = normalizeGithubHandle(cliOptions.accessLogin ?? "", "github-login");
+      const result = await requestRepositoryAccess(
+        `${baseUrl}/editors`,
+        runtime.sessionToken,
+        {
+          method: "POST",
+          body: JSON.stringify({ login: githubLogin }),
+        },
+      );
+      const action = result.action === "unchanged" ? "already had" : "now has";
+      console.log(`@${githubLogin} ${action} edit access for ${result.repoSlug}.`);
+      printRepositoryAccessSummary(result);
+      return;
+    }
+    case "revoke": {
+      const githubLogin = normalizeGithubHandle(cliOptions.accessLogin ?? "", "github-login");
+      const result = await requestRepositoryAccess(
+        `${baseUrl}/editors/${encodeURIComponent(githubLogin)}`,
+        runtime.sessionToken,
+        {
+          method: "DELETE",
+        },
+      );
+      const action = result.action === "unchanged" ? "did not have" : "no longer has";
+      console.log(`@${githubLogin} ${action} edit access for ${result.repoSlug}.`);
+      printRepositoryAccessSummary(result);
+      return;
+    }
+  }
+}
+
 const CLI_OPTIONS = parseCliOptions(process.argv.slice(2));
 
 if (CLI_OPTIONS.help) {
@@ -478,6 +855,11 @@ if (CLI_OPTIONS.command === "logout") {
 
 if (CLI_OPTIONS.command === "whoami") {
   runGithubWhoAmICommand();
+  process.exit(0);
+}
+
+if (CLI_OPTIONS.command === "access") {
+  await runAccessCommand(CLI_OPTIONS);
   process.exit(0);
 }
 
@@ -905,6 +1287,7 @@ function App() {
   const boardRef = useRef<BoxRenderable | null>(null);
   const isMousePaintingRef = useRef(false);
   const hasHydratedPixelsRef = useRef(false);
+  const accessMessageReceivedRef = useRef(false);
   const [doc] = useState(() => new Y.Doc());
   const [provider] = useState(
     () =>
@@ -941,16 +1324,9 @@ function App() {
   const githubStatusText = GITHUB_SESSION ? `GitHub ${GITHUB_LOGIN}` : "GitHub guest";
   const githubHintText = GITHUB_SESSION ? "Run `pxboard logout` to clear" : "Run `pxboard login` to connect";
   const connectionLabel = getConnectionLabel(connectionStatus);
-  const editStatusText = !editAccess.resolved
-    ? "Edit access: checking"
-    : editAccess.canEdit
-      ? "Edit access: enabled"
-      : "Edit access: read-only";
-  const editHintText = editAccess.canEdit
-    ? GITHUB_SESSION
-      ? "Login only adds identity"
-      : "Guests can paint"
-    : editAccess.reason;
+  const editStatusText = getEditStatusText(editAccess);
+  const editHintText = getEditHintText(editAccess, GITHUB_SESSION);
+  const footerAccessText = getFooterAccessText(editAccess);
   const remotePlayersByCell: Record<string, RemotePlayer[]> = {};
   const remoteCursorLabels: RemoteCursorLabel[] = [];
   const visibleRemotePlayers = remotePlayers.slice(0, 3);
@@ -1441,19 +1817,39 @@ function App() {
       _encoder: unknown,
       decoder: decoding.Decoder,
     ) => {
+      accessMessageReceivedRef.current = true;
       const canEdit = decoding.readVarUint(decoder) === 1;
       const reason = decoding.readVarString(decoder).trim();
       const deniedReason = reason || "Editing is disabled on this server.";
+      const accessMode = decoding.hasContent(decoder) ? normalizeAccessMode(decoding.readVarString(decoder)) : "open";
+      const role = decoding.hasContent(decoder)
+        ? normalizeAccessRole(decoding.readVarString(decoder), canEdit)
+        : normalizeAccessRole(undefined, canEdit);
+      const ownerLoginValue = decoding.hasContent(decoder) ? decoding.readVarString(decoder).trim() : "";
+      const repoSlugValue = decoding.hasContent(decoder) ? decoding.readVarString(decoder).trim() : "";
+      const ownerLogin = ownerLoginValue.length > 0 ? ownerLoginValue : undefined;
+      const repoSlug = repoSlugValue.length > 0 ? repoSlugValue : undefined;
+      const collaboratorCount = decoding.hasContent(decoder) ? decoding.readVarUint(decoder) : 0;
+      const nextEditAccess: EditAccessState = {
+        resolved: true,
+        canEdit,
+        reason: canEdit ? "" : deniedReason,
+        accessMode,
+        role,
+        ownerLogin,
+        repoSlug,
+        collaboratorCount,
+      };
 
       startTransition(() => {
-        setEditAccess({
-          resolved: true,
-          canEdit,
-          reason: canEdit ? "" : deniedReason,
-        });
+        setEditAccess(nextEditAccess);
       });
 
-      if (!canEdit) {
+      const ownerAccessMessage = getOwnerAccessMessage(nextEditAccess);
+
+      if (ownerAccessMessage) {
+        setStatusMessage(ownerAccessMessage);
+      } else if (!canEdit) {
         setStatusMessage(deniedReason);
       }
     }) as (typeof provider.messageHandlers)[number];
@@ -1466,6 +1862,23 @@ function App() {
     provider.on("sync", handleSync);
     provider.awareness.on("change", handleAwareness);
     provider.connect();
+
+    const legacyAccessTimeout = setTimeout(() => {
+      if (accessMessageReceivedRef.current) {
+        return;
+      }
+
+      startTransition(() => {
+        setEditAccess({
+          resolved: true,
+          canEdit: true,
+          reason: "",
+          accessMode: "open",
+          role: "open",
+          collaboratorCount: 0,
+        });
+      });
+    }, 1200);
 
     syncBoardMetadata();
     handlePixels();
@@ -1481,6 +1894,7 @@ function App() {
       provider.off("status", handleStatus);
       provider.off("sync", handleSync);
       provider.awareness.off("change", handleAwareness);
+      clearTimeout(legacyAccessTimeout);
       provider.destroy();
       doc.destroy();
     };
@@ -1534,6 +1948,14 @@ function App() {
           <text fg="#64748b">{truncateLabel(githubHintText, 26)}</text>
           <text fg={editAccess.canEdit ? READY_COLOR : WARNING_COLOR}>{truncateLabel(editStatusText, 22)}</text>
           <text fg="#64748b">{truncateLabel(editHintText, 26)}</text>
+          {editAccess.repoSlug ? (
+            <text fg="#94a3b8">
+              Access: {editAccess.accessMode === "owner_allowlist" ? "Protected" : "Open"}
+            </text>
+          ) : null}
+          {editAccess.repoSlug ? (
+            <text fg="#64748b">Editors: {editAccess.collaboratorCount}</text>
+          ) : null}
           <text fg="#f8fafc">Live cursors</text>
           {visibleRemotePlayers.length === 0 ? (
             <text fg="#64748b">Waiting for another painter</text>
@@ -1674,9 +2096,7 @@ function App() {
           {connectionLabel} | {githubStatusText}
         </text>
         <text fg={editAccess.canEdit ? READY_COLOR : WARNING_COLOR}>
-          {editAccess.canEdit
-            ? "Paint enabled | Live presence | Frontier growth"
-            : truncateLabel(editAccess.reason, 42)}
+          {truncateLabel(footerAccessText, 42)}
         </text>
       </box>
     </box>

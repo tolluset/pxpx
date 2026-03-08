@@ -2,19 +2,19 @@
 
 ## Goal
 
-Keep the default developer runtime predictable without requiring users to set `PIXEL_SERVER_URL` manually.
+Keep the default runtime usable for end users without requiring them to start a local server or set `PIXEL_SERVER_URL` manually.
 
 ## Decision
 
-- Hardcode the local websocket URL as the default client endpoint for development
-- Keep `PIXEL_SERVER_URL` as an override for Cloudflare deployments or future migrations
+- Hardcode the deployed Cloudflare Worker URL as the default client endpoint
+- Keep `PIXEL_SERVER_URL` as an override for local development or future migrations
 - Add a Bun compile script so the client can be packaged as a runnable binary
 - Add an install script that can install release binaries into a writable directory already on `PATH`
 - Add a release packaging script that creates per-platform GitHub release assets
 
 ## Result
 
-- Default endpoint: `ws://127.0.0.1:1234`
+- Default endpoint: `wss://pixel-game-collab.dlqud19.workers.dev`
 - Build command: `pnpm build:client`
 - Release package command: `pnpm package:client:release`
 - Installer entrypoint: `install.sh`
@@ -23,5 +23,5 @@ Keep the default developer runtime predictable without requiring users to set `P
 - Local server override:
 
 ```bash
-PIXEL_SERVER_URL=wss://<your-worker-url> pnpm dev:client
+PIXEL_SERVER_URL=ws://127.0.0.1:1234 pnpm dev:client
 ```

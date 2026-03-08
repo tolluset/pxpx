@@ -1,0 +1,34 @@
+export const FAVICON_SVG = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <rect width="64" height="64" rx="16" fill="#020617"/>
+  <rect x="7" y="7" width="50" height="50" rx="12" fill="#0f172a" stroke="#334155" stroke-width="2"/>
+  <rect x="15" y="15" width="14" height="14" rx="4" fill="#f59e0b"/>
+  <rect x="35" y="15" width="14" height="14" rx="4" fill="#38bdf8"/>
+  <rect x="15" y="35" width="14" height="14" rx="4" fill="#10b981"/>
+  <rect x="35" y="35" width="14" height="14" rx="4" fill="#fb7185"/>
+  <rect x="28" y="28" width="8" height="8" rx="2" fill="#f8fafc"/>
+  <path d="M11 22V12a1 1 0 0 1 1-1h10" stroke="#f8fafc" stroke-width="2.5" stroke-linecap="round"/>
+</svg>`;
+
+const FAVICON_ICO_BASE64 =
+  "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";
+
+let faviconIcoBytes: Uint8Array | null = null;
+
+function decodeBase64(base64: string) {
+  const binary = atob(base64);
+  const bytes = new Uint8Array(binary.length);
+
+  for (let index = 0; index < binary.length; index += 1) {
+    bytes[index] = binary.charCodeAt(index);
+  }
+
+  return bytes;
+}
+
+export function getFaviconIcoBytes() {
+  if (!faviconIcoBytes) {
+    faviconIcoBytes = decodeBase64(FAVICON_ICO_BASE64);
+  }
+
+  return faviconIcoBytes;
+}

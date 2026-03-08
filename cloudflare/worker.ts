@@ -4,12 +4,19 @@ import * as syncProtocol from "y-protocols/sync";
 import * as awarenessProtocol from "y-protocols/awareness";
 import * as encoding from "lib0/encoding";
 import * as decoding from "lib0/decoding";
+import { FAVICON_SVG, getFaviconIcoBytes } from "./favicon";
 
 const DOC_STATE_KEY = "doc-state";
+const ROOM_ACCESS_POLICY_KEY = "room-access-policy";
+const INITIAL_BOARD_WIDTH = 16;
+const INITIAL_BOARD_HEIGHT = 16;
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const MESSAGE_ACCESS = 4;
 const WEBSOCKET_READY_STATE_OPEN = 1;
+const ROOM_RESET_INTERNAL_PATH = "/__admin/reset";
+const ROOM_ACCESS_INTERNAL_PATH = "/__admin/access";
+const ROOM_ACCESS_EDITORS_INTERNAL_PATH = "/__admin/access/editors";
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
@@ -20,19 +27,40 @@ const GITHUB_SESSION_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
 
+type RepositoryAccessMode = "open" | "owner_allowlist";
+type RepositoryAccessRole = "open" | "owner" | "editor" | "viewer";
+
 type ConnectionMeta = {
   controlledIds: number[];
   canEdit: boolean;
   githubLogin?: string;
   deniedReason?: string;
+  accessMode?: RepositoryAccessMode;
+  role?: RepositoryAccessRole;
+  ownerLogin?: string;
+  repoSlug?: string;
+  collaboratorCount?: number;
 };
 
 type JsonRecord = Record<string, unknown>;
 
 type DurableObjectEnv = {
-  ROOMS: DurableObjectNamespace;
+  ROOMS: DurableObjectNamespace<PixelRoom>;
+  GITHUB_USERS: DurableObjectNamespace<GithubUserRegistry>;
   GITHUB_CLIENT_ID?: string;
   GITHUB_SESSION_SECRET?: string;
+  ROOM_RESET_TOKEN?: string;
+};
+
+type GithubUser = GithubSessionTokenPayload["user"];
+
+type PersistedGithubUser = GithubUser & {
+  provider: "github";
+  createdAt: string;
+  updatedAt: string;
+  firstAuthenticatedAt: string;
+  lastAuthenticatedAt: string;
+  loginCount: number;
 };
 
 type GithubSessionTokenPayload = {
@@ -69,10 +97,82 @@ type AuthorizedConnection = {
   canEdit: boolean;
   deniedReason?: string;
   githubLogin?: string;
+  accessMode?: RepositoryAccessMode;
+  role?: RepositoryAccessRole;
+  ownerLogin?: string;
+  repoSlug?: string;
+  collaboratorCount?: number;
+};
+
+type GithubAuthResolution =
+  | {
+      ok: true;
+      user: GithubUser;
+    }
+  | {
+      ok: false;
+      reason: string;
+      status: "missing" | "invalid" | "unconfigured";
+    };
+
+type RepositoryRoom = {
+  roomName: string;
+  repoSlug: string;
+  ownerLogin: string;
+  repoName: string;
+};
+
+type RepositoryAccessPolicy = {
+  v: 1;
+  mode: RepositoryAccessMode;
+  repoSlug: string;
+  ownerLogin: string;
+  editors: string[];
+  createdAt: string;
+  updatedAt: string;
+};
+
+type AwarenessUpdateEvent = {
+  added: number[];
+  updated: number[];
+  removed: number[];
 };
 
 function getRoomName(pathname: string) {
   return decodeURIComponent(pathname.replace(/^\/+/, ""));
+}
+
+function getRoomResetPathRoomName(pathname: string) {
+  const match = pathname.match(/^\/admin\/rooms\/(.+)\/reset$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return readString(decodeURIComponent(match[1]));
+}
+
+function getRoomAccessPathRoomName(pathname: string) {
+  const match = pathname.match(/^\/admin\/rooms\/(.+)\/access$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return readString(decodeURIComponent(match[1]));
+}
+
+function getRoomAccessEditorsPath(pathname: string) {
+  const match = pathname.match(/^\/admin\/rooms\/(.+)\/access\/editors(?:\/([^/]+))?$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return {
+    roomName: readString(decodeURIComponent(match[1])),
+    githubLogin: match[2] ? readString(decodeURIComponent(match[2])) : undefined,
+  };
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -81,6 +181,66 @@ function isRecord(value: unknown): value is JsonRecord {
 
 function readString(value: unknown) {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function normalizeGithubLogin(value: string) {
+  const normalized = value.trim().replace(/^@/, "").toLowerCase();
+
+  if (!/^[a-z\d](?:[a-z\d]|-(?=[a-z\d])){0,38}$/i.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function normalizeRepositoryName(value: string) {
+  const normalized = value.trim().toLowerCase();
+
+  if (!/^[a-z\d._-]+$/i.test(normalized)) {
+    return null;
+  }
+
+  return normalized;
+}
+
+function parseRepositoryRoomName(roomName: string): RepositoryRoom | null {
+  const segments = roomName
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .filter((segment) => segment.length > 0);
+
+  if (segments.length !== 2) {
+    return null;
+  }
+
+  const ownerLogin = normalizeGithubLogin(segments[0]);
+  const repoName = normalizeRepositoryName(segments[1]);
+
+  if (!ownerLogin || !repoName) {
+    return null;
+  }
+
+  return {
+    roomName,
+    ownerLogin,
+    repoName,
+    repoSlug: `${ownerLogin}/${repoName}`,
+  };
+}
+
+function readBearerToken(authorizationHeader: string | null) {
+  if (!authorizationHeader) {
+    return null;
+  }
+
+  const [scheme, token, extra] = authorizationHeader.trim().split(/\s+/);
+
+  if (scheme?.toLowerCase() !== "bearer" || !token || extra) {
+    return null;
+  }
+
+  return token;
 }
 
 function readNumber(value: unknown) {
@@ -112,6 +272,15 @@ function methodNotAllowed(methods: string[]) {
     status: 405,
     headers: {
       allow: methods.join(", "),
+    },
+  });
+}
+
+function staticAssetResponse(body: BodyInit | null, contentType: string) {
+  return new Response(body, {
+    headers: {
+      "cache-control": "public, max-age=86400, stale-while-revalidate=604800",
+      "content-type": contentType,
     },
   });
 }
@@ -204,21 +373,13 @@ async function fetchGithubUser(accessToken: string) {
     throw new Error("GitHub user response was invalid.");
   }
 
-  const login = readString(payload.login);
-  const id = readNumber(payload.id);
-  const htmlUrl = readString(payload.html_url);
+  const user = normalizeGithubUser(payload);
 
-  if (!login || id === null || !htmlUrl) {
+  if (!user) {
     throw new Error("GitHub user response was missing required fields.");
   }
 
-  return {
-    login,
-    id,
-    name: typeof payload.name === "string" ? payload.name : null,
-    htmlUrl,
-    avatarUrl: typeof payload.avatar_url === "string" ? payload.avatar_url : null,
-  };
+  return user;
 }
 
 function toBase64Url(value: Uint8Array | ArrayBuffer) {
@@ -272,13 +433,9 @@ function normalizeGithubSessionTokenPayload(value: unknown): GithubSessionTokenP
     return null;
   }
 
-  const login = readString(user.login);
-  const id = readNumber(user.id);
-  const htmlUrl = readString(user.htmlUrl);
-  const name = readOptionalString(user.name);
-  const avatarUrl = readOptionalString(user.avatarUrl);
+  const normalizedUser = normalizeGithubUser(user);
 
-  if (!login || id === null || !htmlUrl) {
+  if (!normalizedUser) {
     return null;
   }
 
@@ -286,13 +443,7 @@ function normalizeGithubSessionTokenPayload(value: unknown): GithubSessionTokenP
     v: 1,
     iat: issuedAt,
     exp: expiresAt,
-    user: {
-      login,
-      id,
-      name,
-      htmlUrl,
-      avatarUrl,
-    },
+    user: normalizedUser,
   };
 }
 
@@ -300,7 +451,150 @@ function readOptionalString(value: unknown) {
   return typeof value === "string" ? value : null;
 }
 
-async function createGithubSessionToken(secret: string, user: Awaited<ReturnType<typeof fetchGithubUser>>) {
+function normalizeGithubUser(value: unknown): GithubUser | null {
+  if (!isRecord(value)) {
+    return null;
+  }
+
+  const login = readString(value.login);
+  const id = readNumber(value.id);
+  const htmlUrl = readString(value.htmlUrl) ?? readString(value.html_url);
+
+  if (!login || id === null || !htmlUrl) {
+    return null;
+  }
+
+  return {
+    login,
+    id,
+    name: readOptionalString(value.name),
+    htmlUrl,
+    avatarUrl: readOptionalString(value.avatarUrl) ?? readOptionalString(value.avatar_url),
+  };
+}
+
+function getGithubUserStorageKey(id: number) {
+  return `github-user:${id}`;
+}
+
+function getGithubUserLoginIndexKey(login: string) {
+  return `github-user-login:${login.toLowerCase()}`;
+}
+
+async function persistGithubUser(env: DurableObjectEnv, user: GithubUser) {
+  const id = env.GITHUB_USERS.idFromName("github-users");
+  const stub = env.GITHUB_USERS.get(id);
+  const response = await stub.fetch("https://github-users/internal/upsert", {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(user),
+  });
+  const payload = await readJsonResponse(response, "GitHub user registry");
+
+  if (!response.ok) {
+    throw new Error(extractErrorMessage(payload, `GitHub user registry request failed with status ${response.status}.`));
+  }
+
+  return payload;
+}
+
+function readGithubSessionToken(request: Request) {
+  return readString(new URL(request.url).searchParams.get("github_auth")) ?? readBearerToken(request.headers.get("authorization"));
+}
+
+async function resolveGithubAuth(request: Request, env: DurableObjectEnv): Promise<GithubAuthResolution> {
+  const sessionSecret = readString(env.GITHUB_SESSION_SECRET);
+
+  if (!sessionSecret) {
+    return {
+      ok: false,
+      status: "unconfigured",
+      reason: "GitHub access control is not configured on this worker.",
+    };
+  }
+
+  const token = readGithubSessionToken(request);
+
+  if (!token) {
+    return {
+      ok: false,
+      status: "missing",
+      reason: "Run `pxboard login` to verify your GitHub identity.",
+    };
+  }
+
+  const verification = await verifyGithubSessionToken(sessionSecret, token);
+
+  if (verification.ok === false) {
+    return {
+      ok: false,
+      status: "invalid",
+      reason: verification.reason,
+    };
+  }
+
+  return {
+    ok: true,
+    user: verification.user,
+  };
+}
+
+function createDefaultRepositoryAccessPolicy(repositoryRoom: RepositoryRoom, now = new Date().toISOString()): RepositoryAccessPolicy {
+  return {
+    v: 1,
+    mode: "open",
+    repoSlug: repositoryRoom.repoSlug,
+    ownerLogin: repositoryRoom.ownerLogin,
+    editors: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+function normalizeRepositoryAccessMode(value: unknown): RepositoryAccessMode | null {
+  return value === "open" || value === "owner_allowlist" ? value : null;
+}
+
+function normalizeRepositoryAccessPolicy(
+  value: unknown,
+  repositoryRoom: RepositoryRoom,
+): RepositoryAccessPolicy {
+  const fallback = createDefaultRepositoryAccessPolicy(repositoryRoom);
+
+  if (!isRecord(value)) {
+    return fallback;
+  }
+
+  const mode = normalizeRepositoryAccessMode(value.mode) ?? fallback.mode;
+  const editors = Array.isArray(value.editors)
+    ? Array.from(
+        new Set(
+          value.editors
+            .map((editor) => (typeof editor === "string" ? normalizeGithubLogin(editor) : null))
+            .filter((editor): editor is string => editor !== null && editor !== repositoryRoom.ownerLogin),
+        ),
+      ).sort()
+    : fallback.editors;
+
+  return {
+    v: 1,
+    mode,
+    repoSlug: repositoryRoom.repoSlug,
+    ownerLogin: repositoryRoom.ownerLogin,
+    editors,
+    createdAt: readString(value.createdAt) ?? fallback.createdAt,
+    updatedAt: readString(value.updatedAt) ?? fallback.updatedAt,
+  };
+}
+
+function createProtectedRoomDeniedReason(ownerLogin: string) {
+  return `This repository board is read-only. Only @${ownerLogin} and invited collaborators can edit.`;
+}
+
+async function createGithubSessionToken(secret: string, user: GithubUser) {
   const payload: GithubSessionTokenPayload = {
     v: 1,
     iat: Date.now(),
@@ -382,30 +676,6 @@ async function verifyGithubSessionToken(secret: string, token: string): Promise<
   };
 }
 
-function resolveConnectionAccess(request: Request, env: DurableObjectEnv): Promise<AuthorizedConnection> {
-  const token = readString(new URL(request.url).searchParams.get("github_auth"));
-  const sessionSecret = readString(env.GITHUB_SESSION_SECRET);
-
-  if (!token || !sessionSecret) {
-    return Promise.resolve({
-      canEdit: true,
-    });
-  }
-
-  return verifyGithubSessionToken(sessionSecret, token).then((result) => {
-    if (!result.ok) {
-      return {
-        canEdit: true,
-      };
-    }
-
-    return {
-      canEdit: true,
-      githubLogin: result.user.login,
-    };
-  });
-}
-
 async function handleGithubDeviceAuth(request: Request, env: DurableObjectEnv) {
   if (request.method !== "POST") {
     return methodNotAllowed(["POST"]);
@@ -446,7 +716,7 @@ async function handleGithubPoll(request: Request, env: DurableObjectEnv) {
     return errorResponse(503, "GitHub edit auth is not configured on this worker.");
   }
 
-  const payload = await request.json<unknown>().catch(() => null);
+  const payload = await request.json().catch(() => null);
   const deviceCode = isRecord(payload) ? readString(payload.deviceCode) : null;
 
   if (!deviceCode) {
@@ -480,6 +750,7 @@ async function handleGithubPoll(request: Request, env: DurableObjectEnv) {
       }
 
       const user = await fetchGithubUser(accessToken);
+      await persistGithubUser(env, user);
       const sessionToken = await createGithubSessionToken(sessionSecret, user);
 
       return jsonResponse({
@@ -502,12 +773,22 @@ function createConnectionMeta({
   canEdit = false,
   githubLogin,
   deniedReason,
+  accessMode,
+  role,
+  ownerLogin,
+  repoSlug,
+  collaboratorCount,
 }: Partial<ConnectionMeta> = {}): ConnectionMeta {
   return {
     controlledIds: Array.from(controlledIds),
     canEdit,
-    githubLogin: readString(githubLogin) ?? undefined,
+    githubLogin: typeof githubLogin === "string" ? normalizeGithubLogin(githubLogin) ?? undefined : undefined,
     deniedReason: readString(deniedReason) ?? undefined,
+    accessMode: normalizeRepositoryAccessMode(accessMode) ?? undefined,
+    role: role === "open" || role === "owner" || role === "editor" || role === "viewer" ? role : undefined,
+    ownerLogin: typeof ownerLogin === "string" ? normalizeGithubLogin(ownerLogin) ?? undefined : undefined,
+    repoSlug: readString(repoSlug) ?? undefined,
+    collaboratorCount: readNumber(collaboratorCount) ?? undefined,
   };
 }
 
@@ -525,6 +806,14 @@ function normalizeConnectionMeta(value: unknown): ConnectionMeta {
     canEdit: readBoolean(value.canEdit) ?? false,
     githubLogin: readString(value.githubLogin) ?? undefined,
     deniedReason: readString(value.deniedReason) ?? undefined,
+    accessMode: normalizeRepositoryAccessMode(value.accessMode) ?? undefined,
+    role:
+      value.role === "open" || value.role === "owner" || value.role === "editor" || value.role === "viewer"
+        ? value.role
+        : undefined,
+    ownerLogin: readString(value.ownerLogin) ?? undefined,
+    repoSlug: readString(value.repoSlug) ?? undefined,
+    collaboratorCount: readNumber(value.collaboratorCount) ?? undefined,
   });
 }
 
@@ -544,9 +833,85 @@ function normalizeStoredUpdate(update: ArrayBuffer | Uint8Array | null | undefin
   return update instanceof Uint8Array ? update : new Uint8Array(update);
 }
 
+function authorizeRoomReset(request: Request, env: DurableObjectEnv) {
+  const configuredToken = readString(env.ROOM_RESET_TOKEN);
+
+  if (!configuredToken) {
+    return {
+      ok: false as const,
+      response: errorResponse(503, "Room reset is not configured on this worker."),
+    };
+  }
+
+  const providedToken = readBearerToken(request.headers.get("authorization"));
+
+  if (!providedToken || providedToken !== configuredToken) {
+    return {
+      ok: false as const,
+      response: errorResponse(401, "Room reset token is invalid."),
+    };
+  }
+
+  return {
+    ok: true as const,
+    token: configuredToken,
+  };
+}
+
+async function handleRoomReset(request: Request, env: DurableObjectEnv, roomName: string) {
+  if (request.method !== "POST") {
+    return methodNotAllowed(["POST"]);
+  }
+
+  const authorization = authorizeRoomReset(request, env);
+
+  if (!authorization.ok) {
+    return authorization.response;
+  }
+
+  const id = env.ROOMS.idFromName(roomName);
+  const stub = env.ROOMS.get(id);
+  const resetUrl = new URL(`https://pixel-room${ROOM_RESET_INTERNAL_PATH}`);
+  resetUrl.searchParams.set("room", roomName);
+  const response = await stub.fetch(resetUrl.toString(), {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${authorization.token}`,
+    },
+  });
+  const payload = await readJsonResponse(response, "Pixel room reset");
+
+  if (!response.ok) {
+    return jsonResponse(payload ?? { error: "Room reset failed." }, { status: response.status });
+  }
+
+  return jsonResponse(payload ?? { ok: true, roomName });
+}
+
+async function proxyRoomAdminRequest(request: Request, env: DurableObjectEnv, roomName: string, internalPath: string) {
+  const id = env.ROOMS.idFromName(roomName);
+  const stub = env.ROOMS.get(id);
+  const internalUrl = new URL(`https://pixel-room${internalPath}`);
+
+  internalUrl.searchParams.set("room", roomName);
+
+  return stub.fetch(new Request(internalUrl.toString(), request));
+}
+
 export default {
   async fetch(request: Request, env: DurableObjectEnv) {
     const url = new URL(request.url);
+    const roomResetName = getRoomResetPathRoomName(url.pathname);
+    const roomAccessName = getRoomAccessPathRoomName(url.pathname);
+    const roomAccessEditors = getRoomAccessEditorsPath(url.pathname);
+
+    if (url.pathname === "/favicon.svg") {
+      return staticAssetResponse(FAVICON_SVG, "image/svg+xml; charset=utf-8");
+    }
+
+    if (url.pathname === "/favicon.ico") {
+      return staticAssetResponse(getFaviconIcoBytes(), "image/x-icon");
+    }
 
     if (url.pathname === "/") {
       return new Response("Pixel Game collaboration worker is running.\nConnect via /<room> using WebSocket.", {
@@ -572,6 +937,27 @@ export default {
       return handleGithubPoll(request, env);
     }
 
+    if (roomResetName) {
+      return handleRoomReset(request, env, roomResetName);
+    }
+
+    if (roomAccessName) {
+      return proxyRoomAdminRequest(request, env, roomAccessName, ROOM_ACCESS_INTERNAL_PATH);
+    }
+
+    if (roomAccessEditors?.roomName) {
+      const editorSuffix = roomAccessEditors.githubLogin
+        ? `/${encodeURIComponent(roomAccessEditors.githubLogin)}`
+        : "";
+
+      return proxyRoomAdminRequest(
+        request,
+        env,
+        roomAccessEditors.roomName,
+        `${ROOM_ACCESS_EDITORS_INTERNAL_PATH}${editorSuffix}`,
+      );
+    }
+
     const roomName = getRoomName(url.pathname);
 
     if (!roomName) {
@@ -584,9 +970,7 @@ export default {
   },
 };
 
-export class PixelRoom extends DurableObject {
-  private readonly ctx: DurableObjectState;
-  private readonly env: DurableObjectEnv;
+export class PixelRoom extends DurableObject<DurableObjectEnv> {
   private readonly doc = new Y.Doc();
   private readonly awareness = new awarenessProtocol.Awareness(this.doc);
   private readonly connections = new Map<WebSocket, ConnectionMeta>();
@@ -594,8 +978,6 @@ export class PixelRoom extends DurableObject {
 
   constructor(ctx: DurableObjectState, env: DurableObjectEnv) {
     super(ctx, env);
-    this.ctx = ctx;
-    this.env = env;
     this.awareness.setLocalState(null);
     this.ready = this.ctx.blockConcurrencyWhile(async () => {
       const storedUpdate = normalizeStoredUpdate(await this.ctx.storage.get<ArrayBuffer | Uint8Array>(DOC_STATE_KEY));
@@ -614,12 +996,30 @@ export class PixelRoom extends DurableObject {
   }
 
   async fetch(request: Request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === ROOM_RESET_INTERNAL_PATH) {
+      return this.handleRoomReset(request, url);
+    }
+
+    if (url.pathname === ROOM_ACCESS_INTERNAL_PATH) {
+      return this.handleRoomAccess(request, url);
+    }
+
+    if (
+      url.pathname === ROOM_ACCESS_EDITORS_INTERNAL_PATH ||
+      url.pathname.startsWith(`${ROOM_ACCESS_EDITORS_INTERNAL_PATH}/`)
+    ) {
+      return this.handleRoomEditors(request, url);
+    }
+
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Pixel room is ready.", { status: 200 });
     }
 
+    const roomName = getRoomName(url.pathname);
     const [client, server] = Object.values(new WebSocketPair());
-    const connectionMeta = createConnectionMeta(await resolveConnectionAccess(request, this.env));
+    const connectionMeta = createConnectionMeta(await this.resolveConnectionAccess(request, roomName));
 
     this.connections.set(server, connectionMeta);
     this.ctx.acceptWebSocket(server);
@@ -705,6 +1105,312 @@ export class PixelRoom extends DurableObject {
     this.removeConnection(socket);
   }
 
+  private async handleRoomReset(request: Request, url: URL) {
+    if (request.method !== "POST") {
+      return methodNotAllowed(["POST"]);
+    }
+
+    const authorization = authorizeRoomReset(request, this.env);
+
+    if (!authorization.ok) {
+      return authorization.response;
+    }
+
+    await this.ready;
+
+    return jsonResponse(await this.resetRoomState(readString(url.searchParams.get("room")) ?? undefined));
+  }
+
+  private async handleRoomAccess(request: Request, url: URL) {
+    await this.ready;
+
+    const roomName = readString(url.searchParams.get("room"));
+    const repositoryRoom = roomName ? parseRepositoryRoomName(roomName) : null;
+
+    if (!repositoryRoom) {
+      return errorResponse(400, "Repository access control only works for owner/repo rooms.");
+    }
+
+    if (request.method !== "GET" && request.method !== "PUT") {
+      return methodNotAllowed(["GET", "PUT"]);
+    }
+
+    const authorization = await this.requireRepositoryOwner(request, repositoryRoom);
+
+    if (!authorization.ok) {
+      return authorization.response;
+    }
+
+    const policy = await this.readRepositoryAccessPolicy(repositoryRoom);
+
+    if (request.method === "GET") {
+      return jsonResponse(this.createRepositoryAccessResponse(repositoryRoom, policy, authorization.user.login));
+    }
+
+    const payload = await request.json().catch(() => null);
+    const mode = normalizeRepositoryAccessMode(isRecord(payload) ? payload.mode : null);
+
+    if (!mode) {
+      return errorResponse(400, "mode must be either open or owner_allowlist.");
+    }
+
+    const nextPolicy: RepositoryAccessPolicy = {
+      ...policy,
+      mode,
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.writeRepositoryAccessPolicy(nextPolicy);
+    await this.refreshConnectionAccess(repositoryRoom);
+
+    return jsonResponse({
+      action: mode === "owner_allowlist" ? "enabled" : "disabled",
+      ...this.createRepositoryAccessResponse(repositoryRoom, nextPolicy, authorization.user.login),
+    });
+  }
+
+  private async handleRoomEditors(request: Request, url: URL) {
+    await this.ready;
+
+    const roomName = readString(url.searchParams.get("room"));
+    const repositoryRoom = roomName ? parseRepositoryRoomName(roomName) : null;
+
+    if (!repositoryRoom) {
+      return errorResponse(400, "Repository access control only works for owner/repo rooms.");
+    }
+
+    const authorization = await this.requireRepositoryOwner(request, repositoryRoom);
+
+    if (!authorization.ok) {
+      return authorization.response;
+    }
+
+    const policy = await this.readRepositoryAccessPolicy(repositoryRoom);
+
+    if (url.pathname === ROOM_ACCESS_EDITORS_INTERNAL_PATH) {
+      if (request.method !== "POST") {
+        return methodNotAllowed(["POST"]);
+      }
+
+      const payload = await request.json().catch(() => null);
+      const githubLogin = isRecord(payload) ? normalizeGithubLogin(readString(payload.login) ?? "") : null;
+
+      if (!githubLogin) {
+        return errorResponse(400, "login must be a valid GitHub handle.");
+      }
+
+      if (githubLogin === repositoryRoom.ownerLogin) {
+        return errorResponse(400, "The repository owner already has edit access.");
+      }
+
+      const editors = Array.from(new Set(policy.editors.concat(githubLogin))).sort();
+      const nextPolicy: RepositoryAccessPolicy = {
+        ...policy,
+        editors,
+        updatedAt: new Date().toISOString(),
+      };
+
+      await this.writeRepositoryAccessPolicy(nextPolicy);
+      await this.refreshConnectionAccess(repositoryRoom);
+
+      return jsonResponse({
+        action: policy.editors.includes(githubLogin) ? "unchanged" : "granted",
+        editor: githubLogin,
+        ...this.createRepositoryAccessResponse(repositoryRoom, nextPolicy, authorization.user.login),
+      });
+    }
+
+    const loginSegment = readString(url.pathname.slice(ROOM_ACCESS_EDITORS_INTERNAL_PATH.length + 1));
+    const githubLogin = loginSegment ? normalizeGithubLogin(loginSegment) : null;
+
+    if (request.method !== "DELETE") {
+      return methodNotAllowed(["DELETE"]);
+    }
+
+    if (!githubLogin) {
+      return errorResponse(400, "login must be a valid GitHub handle.");
+    }
+
+    const nextPolicy: RepositoryAccessPolicy = {
+      ...policy,
+      editors: policy.editors.filter((editor) => editor !== githubLogin),
+      updatedAt: new Date().toISOString(),
+    };
+
+    await this.writeRepositoryAccessPolicy(nextPolicy);
+    await this.refreshConnectionAccess(repositoryRoom);
+
+    return jsonResponse({
+      action: nextPolicy.editors.length === policy.editors.length ? "unchanged" : "revoked",
+      editor: githubLogin,
+      ...this.createRepositoryAccessResponse(repositoryRoom, nextPolicy, authorization.user.login),
+    });
+  }
+
+  private async requireRepositoryOwner(request: Request, repositoryRoom: RepositoryRoom) {
+    const auth = await resolveGithubAuth(request, this.env);
+
+    if (auth.ok === false) {
+      return {
+        ok: false as const,
+        response: errorResponse(
+          auth.status === "unconfigured" ? 503 : 401,
+          auth.status === "missing"
+            ? `Run \`pxboard login\` as @${repositoryRoom.ownerLogin} to manage access.`
+            : auth.reason,
+        ),
+      };
+    }
+
+    const githubLogin = normalizeGithubLogin(auth.user.login);
+
+    if (githubLogin !== repositoryRoom.ownerLogin) {
+      return {
+        ok: false as const,
+        response: errorResponse(403, `Only @${repositoryRoom.ownerLogin} can manage access for ${repositoryRoom.repoSlug}.`),
+      };
+    }
+
+    return {
+      ok: true as const,
+      user: auth.user,
+    };
+  }
+
+  private async readRepositoryAccessPolicy(repositoryRoom: RepositoryRoom) {
+    return normalizeRepositoryAccessPolicy(
+      await this.ctx.storage.get<RepositoryAccessPolicy>(ROOM_ACCESS_POLICY_KEY),
+      repositoryRoom,
+    );
+  }
+
+  private async writeRepositoryAccessPolicy(policy: RepositoryAccessPolicy) {
+    await this.ctx.storage.put(ROOM_ACCESS_POLICY_KEY, policy);
+  }
+
+  private createRepositoryAccessResponse(
+    repositoryRoom: RepositoryRoom,
+    policy: RepositoryAccessPolicy,
+    requesterLogin: string,
+  ) {
+    return {
+      ok: true,
+      roomName: repositoryRoom.roomName,
+      repoSlug: repositoryRoom.repoSlug,
+      ownerLogin: repositoryRoom.ownerLogin,
+      mode: policy.mode,
+      editors: policy.editors,
+      collaboratorCount: policy.editors.length,
+      requesterLogin,
+    };
+  }
+
+  private buildRepositoryConnectionAccess(options: {
+    repositoryRoom: RepositoryRoom;
+    policy: RepositoryAccessPolicy;
+    githubLogin?: string;
+    deniedReason?: string;
+  }): AuthorizedConnection {
+    const githubLogin = options.githubLogin ? normalizeGithubLogin(options.githubLogin) : null;
+    const base = {
+      githubLogin: githubLogin ?? undefined,
+      accessMode: options.policy.mode,
+      ownerLogin: options.repositoryRoom.ownerLogin,
+      repoSlug: options.repositoryRoom.repoSlug,
+      collaboratorCount: options.policy.editors.length,
+    } satisfies Omit<AuthorizedConnection, "canEdit">;
+
+    if (options.policy.mode === "open") {
+      return {
+        ...base,
+        canEdit: true,
+        role: githubLogin === options.repositoryRoom.ownerLogin ? "owner" : "open",
+      };
+    }
+
+    if (githubLogin === options.repositoryRoom.ownerLogin) {
+      return {
+        ...base,
+        canEdit: true,
+        role: "owner",
+      };
+    }
+
+    if (githubLogin && options.policy.editors.includes(githubLogin)) {
+      return {
+        ...base,
+        canEdit: true,
+        role: "editor",
+      };
+    }
+
+    return {
+      ...base,
+      canEdit: false,
+      role: "viewer",
+      deniedReason: options.deniedReason ?? createProtectedRoomDeniedReason(options.repositoryRoom.ownerLogin),
+    };
+  }
+
+  private async resolveConnectionAccess(request: Request, roomName: string): Promise<AuthorizedConnection> {
+    const repositoryRoom = parseRepositoryRoomName(roomName);
+
+    if (!repositoryRoom) {
+      return {
+        canEdit: true,
+        accessMode: "open",
+        role: "open",
+      };
+    }
+
+    const policy = await this.readRepositoryAccessPolicy(repositoryRoom);
+    const auth = await resolveGithubAuth(request, this.env);
+
+    if (policy.mode === "open") {
+      return this.buildRepositoryConnectionAccess({
+        repositoryRoom,
+        policy,
+        githubLogin: auth.ok ? auth.user.login : undefined,
+      });
+    }
+
+    if (auth.ok === false) {
+      return this.buildRepositoryConnectionAccess({
+        repositoryRoom,
+        policy,
+        deniedReason:
+          auth.status === "missing"
+            ? `Protected mode is enabled for ${repositoryRoom.repoSlug}. Run \`pxboard login\` and ask @${repositoryRoom.ownerLogin} for access.`
+            : auth.reason,
+      });
+    }
+
+    return this.buildRepositoryConnectionAccess({
+      repositoryRoom,
+      policy,
+      githubLogin: auth.user.login,
+    });
+  }
+
+  private async refreshConnectionAccess(repositoryRoom: RepositoryRoom) {
+    const policy = await this.readRepositoryAccessPolicy(repositoryRoom);
+
+    for (const [socket, connectionMeta] of this.connections.entries()) {
+      const nextConnectionMeta = createConnectionMeta({
+        ...this.buildRepositoryConnectionAccess({
+          repositoryRoom,
+          policy,
+          githubLogin: connectionMeta.githubLogin,
+        }),
+        controlledIds: connectionMeta.controlledIds,
+      });
+
+      this.connections.set(socket, nextConnectionMeta);
+      socket.serializeAttachment(nextConnectionMeta);
+      this.sendAccessStatus(socket, nextConnectionMeta);
+    }
+  }
+
   private attachListeners() {
     this.doc.on("update", (update) => {
       const encoder = encoding.createEncoder();
@@ -719,7 +1425,7 @@ export class PixelRoom extends DurableObject {
       void this.persistDocState();
     });
 
-    this.awareness.on("update", ({ added, updated, removed }, origin) => {
+    this.awareness.on("update", ({ added, updated, removed }: AwarenessUpdateEvent, origin: unknown) => {
       if (origin instanceof WebSocket) {
         const connectionMeta = this.connections.get(origin);
 
@@ -762,6 +1468,59 @@ export class PixelRoom extends DurableObject {
     await this.ctx.storage.put(DOC_STATE_KEY, Y.encodeStateAsUpdate(this.doc));
   }
 
+  private async resetRoomState(roomName?: string) {
+    const boardMap = this.doc.getMap<number>("board");
+    const pixelsMap = this.doc.getMap<string>("pixels");
+    const paintLogArray = this.doc.getArray<unknown>("paintLog");
+    const clearedPixels = pixelsMap.size;
+    const clearedPaintLogEntries = paintLogArray.length;
+    const previousBoardWidth = readNumber(boardMap.get("width")) ?? INITIAL_BOARD_WIDTH;
+    const previousBoardHeight = readNumber(boardMap.get("height")) ?? INITIAL_BOARD_HEIGHT;
+    const boardKeys: string[] = [];
+    const pixelKeys: string[] = [];
+
+    boardMap.forEach((_, key) => {
+      boardKeys.push(key);
+    });
+    pixelsMap.forEach((_, key) => {
+      pixelKeys.push(key);
+    });
+
+    this.doc.transact(() => {
+      boardKeys.forEach((key) => {
+        boardMap.delete(key);
+      });
+      pixelKeys.forEach((key) => {
+        pixelsMap.delete(key);
+      });
+
+      if (paintLogArray.length > 0) {
+        paintLogArray.delete(0, paintLogArray.length);
+      }
+
+      boardMap.set("width", INITIAL_BOARD_WIDTH);
+      boardMap.set("height", INITIAL_BOARD_HEIGHT);
+    });
+
+    await this.persistDocState();
+
+    return {
+      ok: true,
+      roomName,
+      resetAt: new Date().toISOString(),
+      clearedPixels,
+      clearedPaintLogEntries,
+      previousBoardSize: {
+        width: previousBoardWidth,
+        height: previousBoardHeight,
+      },
+      boardSize: {
+        width: INITIAL_BOARD_WIDTH,
+        height: INITIAL_BOARD_HEIGHT,
+      },
+    };
+  }
+
   private sendInitialSync(socket: WebSocket, connectionMeta: ConnectionMeta) {
     const syncEncoder = encoding.createEncoder();
     encoding.writeVarUint(syncEncoder, MESSAGE_SYNC);
@@ -799,6 +1558,11 @@ export class PixelRoom extends DurableObject {
     encoding.writeVarUint(encoder, MESSAGE_ACCESS);
     encoding.writeVarUint(encoder, connectionMeta.canEdit ? 1 : 0);
     encoding.writeVarString(encoder, connectionMeta.deniedReason ?? "");
+    encoding.writeVarString(encoder, connectionMeta.accessMode ?? "open");
+    encoding.writeVarString(encoder, connectionMeta.role ?? "open");
+    encoding.writeVarString(encoder, connectionMeta.ownerLogin ?? "");
+    encoding.writeVarString(encoder, connectionMeta.repoSlug ?? "");
+    encoding.writeVarUint(encoder, connectionMeta.collaboratorCount ?? 0);
     this.send(socket, encoding.toUint8Array(encoder));
   }
 
@@ -817,5 +1581,69 @@ export class PixelRoom extends DurableObject {
         socket.close(1011, "Send failed");
       } catch {}
     }
+  }
+}
+
+export class GithubUserRegistry extends DurableObject<DurableObjectEnv> {
+  constructor(ctx: DurableObjectState, env: DurableObjectEnv) {
+    super(ctx, env);
+  }
+
+  async fetch(request: Request) {
+    const url = new URL(request.url);
+
+    if (url.pathname === "/internal/upsert") {
+      return this.handleUpsert(request);
+    }
+
+    return new Response("GitHub user registry is ready.", { status: 200 });
+  }
+
+  private async handleUpsert(request: Request) {
+    if (request.method !== "POST") {
+      return methodNotAllowed(["POST"]);
+    }
+
+    const payload = await request.json().catch(() => null);
+    const user = normalizeGithubUser(payload);
+
+    if (!user) {
+      return errorResponse(400, "GitHub user payload is invalid.");
+    }
+
+    const now = new Date().toISOString();
+    const userKey = getGithubUserStorageKey(user.id);
+    const loginKey = getGithubUserLoginIndexKey(user.login);
+    const existing = await this.ctx.storage.get<PersistedGithubUser>(userKey);
+    const record: PersistedGithubUser = existing
+      ? {
+          ...existing,
+          ...user,
+          updatedAt: now,
+          lastAuthenticatedAt: now,
+          loginCount: existing.loginCount + 1,
+        }
+      : {
+          ...user,
+          provider: "github",
+          createdAt: now,
+          updatedAt: now,
+          firstAuthenticatedAt: now,
+          lastAuthenticatedAt: now,
+          loginCount: 1,
+        };
+
+    await this.ctx.storage.put(userKey, record);
+    await this.ctx.storage.put(loginKey, user.id);
+
+    if (existing && existing.login.toLowerCase() !== user.login.toLowerCase()) {
+      await this.ctx.storage.delete(getGithubUserLoginIndexKey(existing.login));
+    }
+
+    return jsonResponse({
+      ok: true,
+      created: existing === undefined,
+      user: record,
+    });
   }
 }
