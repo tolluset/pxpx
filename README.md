@@ -104,12 +104,36 @@ Other project scripts:
 
 ```bash
 pnpm build:client
+pnpm dev:ssh-gateway
 pnpm package:client:release
 pnpm dev:server:cloudflare
 pnpm deploy:server:cloudflare
 pnpm typegen:worker
 pnpm typecheck
 ```
+
+## SSH Gateway
+
+The repository also includes a custom SSH gateway for hosted entrypoints such as:
+
+```bash
+ssh pxpx.sh
+ssh -t pxpx.sh facebook/react
+```
+
+Run it locally on a high port:
+
+```bash
+PXPX_GATEWAY_PORT=22222 \
+PXPX_GATEWAY_HOST=127.0.0.1 \
+PXPX_GATEWAY_HOST_KEYS=/tmp/pxpx-hostkey \
+PXPX_GATEWAY_COMMAND=/usr/local/bin/pxpx \
+PXPX_GATEWAY_RUN_AS_USER=pxpx \
+PXPX_GATEWAY_RUN_HOME=/home/pxpx \
+pnpm dev:ssh-gateway
+```
+
+The gateway accepts SSH public-key authentication, ignores the presented SSH username, launches only `pxpx`, and stores GitHub auth state by SSH public-key fingerprint via `PIXEL_GITHUB_AUTH_FILE`.
 
 ## Build And Package
 
@@ -223,6 +247,7 @@ curl -X POST \
 | `PIXEL_ROOM` | Explicit room name | `pixel-game` |
 | `PIXEL_REPO` | Repository slug alias for the room | none |
 | `PIXEL_NAME` | Player label override | stored GitHub login or random `player-xxxx` |
+| `PIXEL_GITHUB_AUTH_FILE` | Override the stored GitHub auth session path | XDG config path under `~/.config/pxboard` |
 | `PIXEL_GITHUB_CLIENT_ID` | Direct GitHub device-login fallback | none |
 | `GITHUB_CLIENT_ID` | Same fallback, alternate name | none |
 | `GITHUB_SESSION_SECRET` | Worker-side HMAC secret for signed GitHub sessions | none |

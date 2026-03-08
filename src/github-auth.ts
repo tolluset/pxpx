@@ -87,6 +87,16 @@ function readOptionalString(value: unknown) {
   return typeof value === "string" ? value : null;
 }
 
+function resolveGithubAuthFilePath() {
+  const overridePath = readString(process.env.PIXEL_GITHUB_AUTH_FILE);
+
+  if (overridePath) {
+    return path.resolve(overridePath);
+  }
+
+  return path.join(getConfigDirectoryPath(), GITHUB_AUTH_FILE_NAME);
+}
+
 function readNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
@@ -484,7 +494,7 @@ async function completeWorkerLogin(authServerUrl: string, deviceCodeResponse: Gi
 }
 
 export function getGithubAuthFilePath() {
-  return path.join(getConfigDirectoryPath(), GITHUB_AUTH_FILE_NAME);
+  return resolveGithubAuthFilePath();
 }
 
 export function getAuthServerUrl(serverUrl: string) {
@@ -525,11 +535,14 @@ export function readStoredGithubSession() {
 }
 
 export function writeStoredGithubSession(session: GithubAuthSession) {
+  const authFilePath = getGithubAuthFilePath();
+
+  mkdirSync(path.dirname(authFilePath), { recursive: true });
   ensureConfigDirectory();
-  writeFileSync(getGithubAuthFilePath(), `${JSON.stringify(session, null, 2)}\n`, "utf8");
+  writeFileSync(authFilePath, `${JSON.stringify(session, null, 2)}\n`, "utf8");
 
   try {
-    chmodSync(getGithubAuthFilePath(), 0o600);
+    chmodSync(authFilePath, 0o600);
   } catch {}
 }
 

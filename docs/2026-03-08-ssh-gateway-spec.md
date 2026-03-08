@@ -2,9 +2,9 @@
 
 ## Status
 
-Proposed on 2026-03-08.
+Implemented on the OCI test host on 2026-03-08.
 
-This document describes a planned SSH entrypoint for the project. It does not describe behavior that exists today.
+The custom gateway described here now backs the hosted SSH entrypoint. Some deployment details may still evolve.
 
 ## Goal
 
@@ -80,21 +80,21 @@ SSH client
   -> Durable Object room
 ```
 
-### Recommended Phase 1 Host Design
+### Current Hosted Design
 
-Use the operating system SSH server instead of building a custom SSH server first.
+Use a custom SSH gateway on public port `22`.
 
-- Host OS: macOS on a dedicated Mac mini is acceptable
-- SSH entrypoint: system `sshd`
-- Isolation model: dedicated local user such as `pxboard`
-- Command restriction: `ForceCommand` launcher script
-- Long-running service management: `launchd`
+- SSH entrypoint: custom SSH server
+- Runtime launcher: `pxpx` only
+- Runtime user: dedicated unprivileged local user such as `pxpx`
+- Host shell access: separate system `sshd` on admin port `2222`
+- Long-running service management: `systemd` or `launchd`
 
-This keeps the SSH surface area small and avoids shipping a custom SSH daemon in v1.
+This is what enables plain `ssh pxpx.sh` without requiring every user to set `User pxpx` in local SSH config.
 
-### Future Hosted Design
+### Future Gateway Enhancements
 
-A custom SSH gateway process remains a valid later option if the project needs:
+The custom SSH gateway can grow later if the project needs:
 
 - custom SSH banners
 - richer deep-link commands
@@ -204,9 +204,9 @@ The SSH entrypoint must not expose the host as a normal shell box.
 
 ### Required Isolation Controls
 
-- Create a dedicated unprivileged OS user such as `pxboard`
-- Restrict login to the launcher only with `ForceCommand`
-- Reject any remote command that is not empty or a valid room selector
+- Create a dedicated unprivileged OS user such as `pxpx`
+- Run the board process as that unprivileged user even if the gateway itself binds port `22`
+- Reject any remote command that is not empty or a valid `pxpx` subcommand
 - Disable SSH forwarding features:
   - TCP forwarding
   - agent forwarding
@@ -219,15 +219,12 @@ The SSH entrypoint must not expose the host as a normal shell box.
 - Set connection and idle timeouts
 - Limit concurrent sessions per host
 
-### Launcher Requirements
+### Auth Storage Requirements
 
-The launcher script should:
-
-- read `SSH_ORIGINAL_COMMAND`
-- normalize to either default room or `owner/repo`
-- exec `pxboard` directly instead of invoking a shell pipeline
-- emit short user-facing errors for invalid input
-- avoid string interpolation into a shell command
+- The hosted gateway must not share one GitHub auth file across every remote user.
+- Store `pxpx login` state by SSH public-key fingerprint.
+- Pass a per-identity auth file path to the child process with `PIXEL_GITHUB_AUTH_FILE`.
+- If the gateway ever supports anonymous SSH, anonymous sessions must not reuse persistent auth state.
 
 ## macOS Host Requirements
 

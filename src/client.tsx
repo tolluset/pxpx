@@ -199,6 +199,7 @@ Environment variables:
   PIXEL_NAME            Local player label (default: GitHub login or player-xxxx)
   PIXEL_REPO            Repository slug alias for PIXEL_ROOM, for example owner/repo
   PIXEL_AUTH_SERVER_URL GitHub login worker URL (default: wss://pixel-game-collab.dlqud19.workers.dev)
+  PIXEL_GITHUB_AUTH_FILE Override the stored GitHub auth session path
 `);
 }
 
