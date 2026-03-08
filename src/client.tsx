@@ -161,6 +161,8 @@ const REMOTE_CURSOR_LABEL_WIDTH = 18;
 const MAX_PAINT_LOG_ENTRIES = 200;
 const MAX_VISIBLE_PAINT_LOGS = 10;
 const ERASE_LOG_COLOR_ID = "__erase__";
+const CUSTOM_COLOR_INPUT_HOTKEY = "c";
+const HEX_COLOR_LENGTH = 7;
 const MESSAGE_ACCESS = 4;
 const DEFAULT_PLAY_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
 const DEFAULT_AUTH_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
@@ -1027,8 +1029,47 @@ function getBoardViewport(boardSize: BoardSize, cursor: Cursor, width: number, h
   };
 }
 
-function getColorHex(colorId: string | undefined) {
-  return (colorId && COLOR_BY_ID[colorId]?.hex) || EMPTY_CELL_COLOR;
+function normalizeHexColor(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : null;
+}
+
+function getColorHex(colorValue: string | undefined) {
+  if (!colorValue) {
+    return EMPTY_CELL_COLOR;
+  }
+
+  const paletteColor = COLOR_BY_ID[colorValue];
+
+  if (paletteColor) {
+    return paletteColor.hex;
+  }
+
+  return normalizeHexColor(colorValue) ?? EMPTY_CELL_COLOR;
+}
+
+function getColorLabel(colorValue: string | undefined) {
+  if (!colorValue) {
+    return "Empty";
+  }
+
+  const paletteColor = COLOR_BY_ID[colorValue];
+
+  if (paletteColor) {
+    return paletteColor.name;
+  }
+
+  const normalizedHex = normalizeHexColor(colorValue);
+
+  if (normalizedHex) {
+    return `Custom (${normalizedHex})`;
+  }
+
+  return colorValue;
 }
 
 function getReadableTextColor(hex: string) {
@@ -1059,11 +1100,13 @@ function getRecentPaintColor(hex: string) {
 }
 
 function getPresenceColor(hex: string, presenceHex: string | undefined) {
-  if (typeof presenceHex !== "string" || !presenceHex.startsWith("#")) {
+  const normalizedPresenceHex = normalizeHexColor(presenceHex);
+
+  if (!normalizedPresenceHex) {
     return hex;
   }
 
-  return mixHex(hex, presenceHex, 0.45);
+  return mixHex(hex, normalizedPresenceHex, 0.45);
 }
 
 function truncateLabel(value: string, maxLength: number) {
@@ -1158,20 +1201,24 @@ function formatPaintTime(timestamp: string) {
   ).padStart(2, "0")}`;
 }
 
-function getPaintLogLabel(colorId: string) {
-  if (colorId === ERASE_LOG_COLOR_ID) {
+function getPaintLogLabel(colorValue: string) {
+  if (colorValue === ERASE_LOG_COLOR_ID) {
     return "Cleared";
   }
 
-  return COLOR_BY_ID[colorId]?.name ?? colorId;
+  return getColorLabel(colorValue);
 }
 
-function getPaintLogTextColor(colorId: string) {
-  if (colorId === ERASE_LOG_COLOR_ID) {
+function getPaintLogTextColor(colorValue: string) {
+  if (colorValue === ERASE_LOG_COLOR_ID) {
     return LOG_ERASE_COLOR;
   }
 
-  return COLOR_BY_ID[colorId]?.hex ?? "#f8fafc";
+  if (COLOR_BY_ID[colorValue]) {
+    return COLOR_BY_ID[colorValue].hex;
+  }
+
+  return normalizeHexColor(colorValue) ?? "#f8fafc";
 }
 
 function getRemotePlayer(state: AwarenessState | undefined, clientId: number): RemotePlayer | null {
@@ -1203,16 +1250,16 @@ function getRemotePlayer(state: AwarenessState | undefined, clientId: number): R
 }
 
 function ColorPalette({
-  selectedColorId,
+  selectedColorValue,
   onSelect,
 }: {
-  selectedColorId: string;
+  selectedColorValue: string;
   onSelect: (colorId: string) => void;
 }) {
   return (
     <box flexDirection="column" gap={1}>
       {PALETTE.map((color) => {
-        const isSelected = color.id === selectedColorId;
+        const isSelected = color.id === selectedColorValue;
 
         return (
           <box key={color.id} flexDirection="row" justifyContent="space-between">
@@ -1302,7 +1349,9 @@ function App() {
   const [paintLogArray] = useState(() => doc.getArray<PaintLogEntry>("paintLog"));
   const [cursor, setCursor] = useState<Cursor>(DEFAULT_CURSOR);
   const [boardSize, setBoardSize] = useState<BoardSize>(() => getBoardSizeFromState(boardMap, pixelsMap));
-  const [selectedColorId, setSelectedColorId] = useState(PALETTE[0].id);
+  const [selectedColorValue, setSelectedColorValue] = useState(PALETTE[0].id);
+  const [customColorDraft, setCustomColorDraft] = useState(PALETTE[0].hex);
+  const [isCustomColorInputActive, setIsCustomColorInputActive] = useState(false);
   const [pixelsSnapshot, setPixelsSnapshot] = useState<PixelSnapshot>(() => pixelsMap.toJSON() as PixelSnapshot);
   const [paintLogSnapshot, setPaintLogSnapshot] = useState<PaintLogEntry[]>(
     () => normalizePaintLogEntries(paintLogArray.toJSON() as unknown[]),
@@ -1317,10 +1366,12 @@ function App() {
     `Connecting to ${SERVER_URL} in room ${ROOM_NAME} as ${PLAYER_IDENTITY}...`,
   );
   const deferredPixelsSnapshot = useDeferredValue(pixelsSnapshot);
-  const selectedColor = COLOR_BY_ID[selectedColorId] ?? PALETTE[0];
+  const selectedColorHex = getColorHex(selectedColorValue);
+  const selectedColorLabel = getColorLabel(selectedColorValue);
   const safeCursor = sanitizeCursor(cursor, boardSize);
   const currentCellColorId = deferredPixelsSnapshot[getCellKey(safeCursor.x, safeCursor.y)];
-  const currentCellColor = COLOR_BY_ID[currentCellColorId ?? ""]?.name ?? "Empty";
+  const currentCellColor = getColorLabel(currentCellColorId);
+  const normalizedCustomColorDraft = normalizeHexColor(customColorDraft);
   const githubStatusText = GITHUB_SESSION ? `GitHub ${GITHUB_LOGIN}` : "GitHub guest";
   const githubHintText = GITHUB_SESSION ? "Run `pxboard logout` to clear" : "Run `pxboard login` to connect";
   const connectionLabel = getConnectionLabel(connectionStatus);
@@ -1443,8 +1494,62 @@ function App() {
       return;
     }
 
-    setSelectedColorId(colorId);
+    setSelectedColorValue(colorId);
+    setCustomColorDraft(color.hex);
+    setIsCustomColorInputActive(false);
     setStatusMessage(`Selected ${color.name}`);
+  }
+
+  function beginCustomColorInput() {
+    setIsCustomColorInputActive(true);
+    setCustomColorDraft(getColorHex(selectedColorValue));
+    setStatusMessage("Custom color mode: type #RRGGBB and press Enter");
+  }
+
+  function cancelCustomColorInput() {
+    setIsCustomColorInputActive(false);
+    setStatusMessage("Custom color edit canceled");
+  }
+
+  function applyCustomColor() {
+    const normalizedHex = normalizeHexColor(customColorDraft);
+
+    if (!normalizedHex) {
+      setStatusMessage("Invalid color. Use #RRGGBB.");
+      return;
+    }
+
+    setSelectedColorValue(normalizedHex);
+    setCustomColorDraft(normalizedHex);
+    setIsCustomColorInputActive(false);
+    setStatusMessage(`Selected Custom (${normalizedHex})`);
+  }
+
+  function appendCustomColorInputCharacter(character: string) {
+    const nextCharacter = character.toLowerCase();
+
+    if (!/^#[0-9a-f]$/.test(nextCharacter)) {
+      return;
+    }
+
+    if (nextCharacter === "#") {
+      if (customColorDraft.length === 0) {
+        setCustomColorDraft("#");
+      }
+
+      return;
+    }
+
+    if (customColorDraft.length === 0) {
+      setCustomColorDraft(`#${nextCharacter}`);
+      return;
+    }
+
+    if (customColorDraft.length >= HEX_COLOR_LENGTH) {
+      return;
+    }
+
+    setCustomColorDraft(`${customColorDraft}${nextCharacter}`);
   }
 
   function createPaintLogEntry(x: number, y: number, colorId: string): PaintLogEntry {
@@ -1485,18 +1590,18 @@ function App() {
     const cellKey = getCellKey(x, y);
     const existingColorId = pixelsMap.get(cellKey);
 
-    if (existingColorId === selectedColorId) {
-      setStatusMessage(`(${x + 1}, ${y + 1}) already uses ${selectedColor.name}`);
+    if (existingColorId === selectedColorValue) {
+      setStatusMessage(`(${x + 1}, ${y + 1}) already uses ${selectedColorLabel}`);
       return;
     }
 
     const expandedBoardSize = getExpandedBoardSize(currentBoardSize, targetCursor);
     const willExpand =
       expandedBoardSize.width > currentBoardSize.width || expandedBoardSize.height > currentBoardSize.height;
-    const paintLogEntry = createPaintLogEntry(x, y, selectedColorId);
+    const paintLogEntry = createPaintLogEntry(x, y, selectedColorValue);
 
     doc.transact(() => {
-      pixelsMap.set(cellKey, selectedColorId);
+      pixelsMap.set(cellKey, selectedColorValue);
       appendPaintLogEntry(paintLogEntry);
 
       if (willExpand) {
@@ -1506,12 +1611,12 @@ function App() {
 
     if (willExpand) {
       setStatusMessage(
-        `Painted (${x + 1}, ${y + 1}) with ${selectedColor.name}. Frontier opened to ${expandedBoardSize.width}x${expandedBoardSize.height}.`,
+        `Painted (${x + 1}, ${y + 1}) with ${selectedColorLabel}. Frontier opened to ${expandedBoardSize.width}x${expandedBoardSize.height}.`,
       );
       return;
     }
 
-    setStatusMessage(`Painted (${x + 1}, ${y + 1}) with ${selectedColor.name}`);
+    setStatusMessage(`Painted (${x + 1}, ${y + 1}) with ${selectedColorLabel}`);
   }
 
   function attemptErase(x: number, y: number) {
@@ -1537,7 +1642,7 @@ function App() {
       return;
     }
 
-    const clearedColorName = COLOR_BY_ID[existingColorId]?.name ?? existingColorId;
+    const clearedColorName = getColorLabel(existingColorId);
     const paintLogEntry = createPaintLogEntry(x, y, ERASE_LOG_COLOR_ID);
 
     doc.transact(() => {
@@ -1585,6 +1690,29 @@ function App() {
       return;
     }
 
+    if (isCustomColorInputActive) {
+      if (key.name === "escape") {
+        cancelCustomColorInput();
+        return;
+      }
+
+      if (key.name === "return" || key.name === "enter") {
+        applyCustomColor();
+        return;
+      }
+
+      if (key.name === "backspace" || key.name === "delete") {
+        setCustomColorDraft((previous) => previous.slice(0, -1));
+        return;
+      }
+
+      if (typeof key.name === "string" && key.name.length === 1) {
+        appendCustomColorInputCharacter(key.name);
+      }
+
+      return;
+    }
+
     if (key.name === "escape" || key.name === "q") {
       shutdown();
       return;
@@ -1617,6 +1745,11 @@ function App() {
 
     if (key.name === "x") {
       attemptErase(safeCursor.x, safeCursor.y);
+      return;
+    }
+
+    if (key.name === CUSTOM_COLOR_INPUT_HOTKEY) {
+      beginCustomColorInput();
       return;
     }
 
@@ -1680,9 +1813,9 @@ function App() {
     provider.awareness.setLocalStateField("cursor", {
       x: safeCursor.x,
       y: safeCursor.y,
-      color: selectedColor.hex,
+      color: selectedColorHex,
     });
-  }, [GITHUB_SESSION?.user.login, PLAYER_NAME, provider.awareness, safeCursor.x, safeCursor.y, selectedColor.hex]);
+  }, [GITHUB_SESSION?.user.login, PLAYER_NAME, provider.awareness, safeCursor.x, safeCursor.y, selectedColorHex]);
 
   useEffect(() => {
     const removeInvalidPixels = () => {
@@ -1928,8 +2061,19 @@ function App() {
           gap={1}
         >
           <text fg="#f8fafc">Palette</text>
-          <ColorPalette selectedColorId={selectedColorId} onSelect={setSelectedColor} />
-          <text fg="#94a3b8">Selected: {selectedColor.name}</text>
+          <ColorPalette selectedColorValue={selectedColorValue} onSelect={setSelectedColor} />
+          <text fg="#94a3b8">Selected: {truncateLabel(selectedColorLabel, 26)}</text>
+          <text fg="#f8fafc">Custom color</text>
+          <text fg={isCustomColorInputActive ? WARNING_COLOR : "#94a3b8"}>
+            {isCustomColorInputActive
+              ? `Input: ${truncateLabel(customColorDraft || "#", 19)}`
+              : `Current: ${truncateLabel(normalizedCustomColorDraft ?? customColorDraft, 17)}`}
+          </text>
+          <text fg="#64748b">
+            {isCustomColorInputActive
+              ? "Enter apply, Esc cancel"
+              : "Press C to type #RRGGBB"}
+          </text>
           <text fg="#94a3b8">
             Cursor: ({safeCursor.x + 1}, {safeCursor.y + 1})
           </text>
@@ -1972,7 +2116,8 @@ function App() {
           <text fg="#64748b">Arrows/WASD/HJKL move</text>
           <text fg="#64748b">{editAccess.canEdit ? "Enter/Space paints" : "Enter/Space locked"}</text>
           <text fg="#64748b">{editAccess.canEdit ? "X clears the current cell" : "X is locked"}</text>
-          <text fg="#64748b">1-8 selects color</text>
+          <text fg="#64748b">1-8 selects palette color</text>
+          <text fg="#64748b">C opens custom color input</text>
           <text fg="#64748b">Live cursor cells are color-tinted</text>
           <text fg="#64748b">Name tags track visible cursors</text>
           <text fg="#64748b">Fresh paint glows briefly</text>

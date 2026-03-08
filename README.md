@@ -242,7 +242,8 @@ Room selection precedence:
 - `Arrow keys`, `WASD`, or `HJKL`: move the cursor
 - `Enter`, `Space`, or left click: paint when editing is allowed
 - `X`: clear the current cell when editing is allowed
-- `1-8`: select a color
+- `1-8`: select a palette color
+- `C`: open custom color input mode (`#RRGGBB`, `Enter` to apply, `Esc` to cancel)
 - `Esc` or `Q`: quit
 
 Painting or pushing beyond the south or east edge grows the shared board by `8` cells in that direction.
