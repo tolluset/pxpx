@@ -1,4 +1,4 @@
-# PXPX
+# pxpx
 
 Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. This repository is open source and self-host friendly: it includes the terminal client, a Cloudflare Worker collaboration server, and local build and release scripts.
 
