@@ -130,11 +130,13 @@ const PANEL_BACKGROUND = "#0f172a";
 const BORDER_COLOR = "#334155";
 const READY_COLOR = "#22c55e";
 const WARNING_COLOR = "#f59e0b";
+const LOG_ERASE_COLOR = "#e2e8f0";
 const RECENT_PAINT_WINDOW_MS = 2500;
 const RECENT_PAINT_PRUNE_MS = 250;
 const REMOTE_CURSOR_LABEL_WIDTH = 18;
 const MAX_PAINT_LOG_ENTRIES = 200;
 const MAX_VISIBLE_PAINT_LOGS = 10;
+const ERASE_LOG_COLOR_ID = "__erase__";
 const MESSAGE_ACCESS = 4;
 const DEFAULT_PLAY_SERVER_URL = "ws://127.0.0.1:1234";
 const DEFAULT_AUTH_SERVER_URL = "wss://pixel-game-collab.dlqud19.workers.dev";
@@ -774,6 +776,22 @@ function formatPaintTime(timestamp: string) {
   ).padStart(2, "0")}`;
 }
 
+function getPaintLogLabel(colorId: string) {
+  if (colorId === ERASE_LOG_COLOR_ID) {
+    return "Cleared";
+  }
+
+  return COLOR_BY_ID[colorId]?.name ?? colorId;
+}
+
+function getPaintLogTextColor(colorId: string) {
+  if (colorId === ERASE_LOG_COLOR_ID) {
+    return LOG_ERASE_COLOR;
+  }
+
+  return COLOR_BY_ID[colorId]?.hex ?? "#f8fafc";
+}
+
 function getRemotePlayer(state: AwarenessState | undefined, clientId: number): RemotePlayer | null {
   const rawCursor = state?.cursor;
 
@@ -1053,6 +1071,26 @@ function App() {
     setStatusMessage(`Selected ${color.name}`);
   }
 
+  function createPaintLogEntry(x: number, y: number, colorId: string): PaintLogEntry {
+    return {
+      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+      timestamp: new Date().toISOString(),
+      x,
+      y,
+      colorId,
+      playerName: PLAYER_NAME,
+      githubLogin: GITHUB_SESSION?.user.login,
+    };
+  }
+
+  function appendPaintLogEntry(entry: PaintLogEntry) {
+    paintLogArray.push([entry]);
+
+    if (paintLogArray.length > MAX_PAINT_LOG_ENTRIES) {
+      paintLogArray.delete(0, paintLogArray.length - MAX_PAINT_LOG_ENTRIES);
+    }
+  }
+
   function attemptPlacement(x: number, y: number) {
     if (!editAccess.canEdit) {
       setStatusMessage(editAccess.reason);
@@ -1079,23 +1117,11 @@ function App() {
     const expandedBoardSize = getExpandedBoardSize(currentBoardSize, targetCursor);
     const willExpand =
       expandedBoardSize.width > currentBoardSize.width || expandedBoardSize.height > currentBoardSize.height;
-    const paintLogEntry: PaintLogEntry = {
-      id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
-      timestamp: new Date().toISOString(),
-      x,
-      y,
-      colorId: selectedColorId,
-      playerName: PLAYER_NAME,
-      githubLogin: GITHUB_SESSION?.user.login,
-    };
+    const paintLogEntry = createPaintLogEntry(x, y, selectedColorId);
 
     doc.transact(() => {
       pixelsMap.set(cellKey, selectedColorId);
-      paintLogArray.push([paintLogEntry]);
-
-      if (paintLogArray.length > MAX_PAINT_LOG_ENTRIES) {
-        paintLogArray.delete(0, paintLogArray.length - MAX_PAINT_LOG_ENTRIES);
-      }
+      appendPaintLogEntry(paintLogEntry);
 
       if (willExpand) {
         writeBoardSize(expandedBoardSize);
@@ -1110,6 +1136,40 @@ function App() {
     }
 
     setStatusMessage(`Painted (${x + 1}, ${y + 1}) with ${selectedColor.name}`);
+  }
+
+  function attemptErase(x: number, y: number) {
+    if (!editAccess.canEdit) {
+      setStatusMessage(editAccess.reason);
+      return;
+    }
+
+    const currentBoardSize = getBoardSizeFromState(boardMap, pixelsMap);
+    const targetCursor = { x, y };
+
+    if (!isValidCursor(targetCursor, currentBoardSize)) {
+      return;
+    }
+
+    setCursor(targetCursor);
+
+    const cellKey = getCellKey(x, y);
+    const existingColorId = pixelsMap.get(cellKey);
+
+    if (existingColorId === undefined) {
+      setStatusMessage(`(${x + 1}, ${y + 1}) is already empty`);
+      return;
+    }
+
+    const clearedColorName = COLOR_BY_ID[existingColorId]?.name ?? existingColorId;
+    const paintLogEntry = createPaintLogEntry(x, y, ERASE_LOG_COLOR_ID);
+
+    doc.transact(() => {
+      pixelsMap.delete(cellKey);
+      appendPaintLogEntry(paintLogEntry);
+    });
+
+    setStatusMessage(`Cleared (${x + 1}, ${y + 1}) from ${clearedColorName}`);
   }
 
   function updateCursorFromMouse(event: MouseEvent, shouldPaint: boolean) {
@@ -1176,6 +1236,11 @@ function App() {
 
     if (key.name === "return" || key.name === "enter" || key.name === "space") {
       attemptPlacement(safeCursor.x, safeCursor.y);
+      return;
+    }
+
+    if (key.name === "x") {
+      attemptErase(safeCursor.x, safeCursor.y);
       return;
     }
 
@@ -1290,7 +1355,7 @@ function App() {
         return;
       }
 
-      const validKeys = Array.from(changedKeys).filter((key) => parseCellKey(key) && snapshot[key] !== undefined);
+      const validKeys = Array.from(changedKeys).filter((key) => parseCellKey(key));
 
       if (validKeys.length === 0) {
         return;
@@ -1484,6 +1549,7 @@ function App() {
           ) : null}
           <text fg="#64748b">Arrows/WASD/HJKL move</text>
           <text fg="#64748b">{editAccess.canEdit ? "Enter/Space paints" : "Enter/Space locked"}</text>
+          <text fg="#64748b">{editAccess.canEdit ? "X clears the current cell" : "X is locked"}</text>
           <text fg="#64748b">1-8 selects color</text>
           <text fg="#64748b">Live cursor cells are color-tinted</text>
           <text fg="#64748b">Name tags track visible cursors</text>
@@ -1577,12 +1643,10 @@ function App() {
             <text fg="#64748b">No paint yet</text>
           ) : (
             visiblePaintLogs.map((entry) => {
-              const color = COLOR_BY_ID[entry.colorId];
-
               return (
                 <box key={entry.id} flexDirection="column">
-                  <text fg={color?.hex ?? "#f8fafc"}>
-                    {truncateLabel(`${formatPaintActor(entry)} -> ${color?.name ?? entry.colorId}`, ACTIVITY_WIDTH - 4)}
+                  <text fg={getPaintLogTextColor(entry.colorId)}>
+                    {truncateLabel(`${formatPaintActor(entry)} -> ${getPaintLogLabel(entry.colorId)}`, ACTIVITY_WIDTH - 4)}
                   </text>
                   <text fg="#64748b">
                     {truncateLabel(`${formatPaintTime(entry.timestamp)} (${entry.x + 1}, ${entry.y + 1})`, ACTIVITY_WIDTH - 4)}
