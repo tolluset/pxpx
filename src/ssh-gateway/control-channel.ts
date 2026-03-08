@@ -3,6 +3,7 @@ import net from "node:net";
 import os from "node:os";
 import path from "node:path";
 import { Effect } from "effect";
+import { sanitizePtyWindow } from "./pty";
 import type { ControlChannel } from "./types";
 
 export function createControlChannel(initialRows: number, initialCols: number): ControlChannel {
@@ -12,7 +13,8 @@ export function createControlChannel(initialRows: number, initialCols: number): 
   );
   const server = net.createServer();
   let controlSocket: net.Socket | null = null;
-  let pendingWindow = `${initialRows} ${initialCols}\n`;
+  let currentWindow = sanitizePtyWindow(initialRows, initialCols);
+  let pendingWindow = `${currentWindow.rows} ${currentWindow.cols}\n`;
 
   server.on("connection", (socket) => {
     controlSocket = socket;
@@ -38,7 +40,8 @@ export function createControlChannel(initialRows: number, initialCols: number): 
       rmSync(socketPath, { force: true });
     },
     updateWindow(rows, cols) {
-      const payload = `${rows} ${cols}\n`;
+      currentWindow = sanitizePtyWindow(rows, cols, currentWindow);
+      const payload = `${currentWindow.rows} ${currentWindow.cols}\n`;
 
       if (controlSocket) {
         controlSocket.write(payload);

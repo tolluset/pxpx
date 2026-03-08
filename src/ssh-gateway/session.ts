@@ -1,5 +1,6 @@
 import type { Connection, ExecInfo, PseudoTtyInfo } from "ssh2";
 import { handleExecution } from "./child-process";
+import { sanitizePtyInfo } from "./pty";
 import type { AuthIdentity, ExecutionHandle, UserAccount } from "./types";
 import type { GatewayConfig } from "./config";
 
@@ -31,12 +32,13 @@ export function attachSessionHandlers(
     let execution: ExecutionHandle = NOOP_EXECUTION_HANDLE;
 
     session.on("pty", (sessionAccept, _sessionReject, info) => {
-      ptyInfo = info;
+      ptyInfo = sanitizePtyInfo(info, ptyInfo ?? undefined);
       sessionAccept?.();
     });
 
     session.on("window-change", (sessionAccept, _sessionReject, info) => {
-      ptyInfo = {
+      ptyInfo = sanitizePtyInfo(
+        {
         ...(ptyInfo ?? {
           term: "xterm-256color",
           modes: {},
@@ -49,8 +51,10 @@ export function attachSessionHandlers(
         height: info.height,
         rows: info.rows,
         cols: info.cols,
-      };
-      execution.updateWindow(info.rows, info.cols);
+        },
+        ptyInfo ?? undefined,
+      );
+      execution.updateWindow(ptyInfo.rows, ptyInfo.cols);
       sessionAccept?.();
     });
 

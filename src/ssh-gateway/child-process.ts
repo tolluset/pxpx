@@ -4,6 +4,7 @@ import { resolveCommandPlan } from "./command-plan";
 import type { GatewayConfig } from "./config";
 import { formatGatewayError } from "./errors";
 import { acquireControlChannel } from "./control-channel";
+import { sanitizePtyWindow } from "./pty";
 import { buildRunnerEnvironment, buildSpawnOptions } from "./runner-env";
 import type { AuthIdentity, CommandPlan, ExecutionHandle, PtyState, UserAccount } from "./types";
 import type { PseudoTtyInfo, ServerChannel } from "ssh2";
@@ -88,15 +89,16 @@ export function launchInteractiveCommand(
   account: UserAccount,
   ptyInfo: PseudoTtyInfo,
 ): ExecutionHandle {
+  const window = sanitizePtyWindow(ptyInfo.rows, ptyInfo.cols);
   const env = buildRunnerEnvironment(config, identity, account, (ptyInfo as PtyState).term ?? "xterm-256color");
   const scope = Effect.runSync(Scope.make());
-  const control = Effect.runSync(Scope.extend(acquireControlChannel(ptyInfo.rows, ptyInfo.cols), scope));
+  const control = Effect.runSync(Scope.extend(acquireControlChannel(window.rows, window.cols), scope));
   const runnerArgs = [
     config.runner,
     "--rows",
-    String(ptyInfo.rows),
+    String(window.rows),
     "--cols",
-    String(ptyInfo.cols),
+    String(window.cols),
     "--cwd",
     config.workdir,
     "--uid",
