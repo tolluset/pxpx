@@ -182,6 +182,11 @@ def main():
                             os.kill(child_pid, signal.SIGWINCH)
                         except ProcessLookupError:
                             pass
+                        except PermissionError:
+                            # The PTY size has already been updated via TIOCSWINSZ.
+                            # Hosted deployments may run without CAP_KILL, so best-effort
+                            # SIGWINCH delivery must not crash the runner.
+                            pass
 
             waited_pid, status = os.waitpid(child_pid, os.WNOHANG)
 
