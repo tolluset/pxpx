@@ -19,6 +19,7 @@ Keep a fresh source checkout usable without depending on a maintainer-run shared
 - Release package command: `pnpm package:client:release`
 - Installer entrypoint: `install.sh`
 - Installed binary name: `pxboard`
+- Default release repository: `tolluset/pxpx`
 - Runtime repo routing: `pxboard owner/repo`, `pxboard --repo owner/repo`, or `PIXEL_REPO=owner/repo pxboard`
 - Remote Worker override:
 

@@ -16,7 +16,7 @@ ssh -t pxpx.sh facebook/react
 ssh -t pxpx.sh torvalds/linux
 ```
 
-`ssh pxpx.sh` is the product hook. You can also jump straight into a repository-scoped room with any `owner/repo` slug, such as `torvalds/linux`. The rest of this README explains how to run and self-host the same stack from source.
+`ssh pxpx.sh` is the product hook. You do not need a fixed SSH username such as `pxpx@`; the gateway accepts plain `ssh pxpx.sh` and ignores the presented SSH username. You can also jump straight into a repository-scoped room with any `owner/repo` slug, such as `torvalds/linux`. The rest of this README explains how to run and self-host the same stack from source.
 
 ## Open-source Scope
 
@@ -129,10 +129,14 @@ The installed binary keeps the same defaults as the source build. Start a local 
 Install from GitHub release assets:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | PIXEL_GAME_REPO=<owner>/<repo> sh
+curl -fsSL https://raw.githubusercontent.com/tolluset/pxpx/main/install.sh | sh
 ```
 
-Release downloads currently require `PIXEL_GAME_REPO` or `--repo` because `install.sh` does not ship with a default repository slug.
+Override the default release source if you are running a fork:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/<owner>/<repo>/main/install.sh | PIXEL_GAME_REPO=<owner>/<repo> sh
+```
 
 ## Common Commands
 
@@ -196,6 +200,8 @@ This repository includes a Durable Object-backed Yjs collaboration Worker in `cl
 
 Repository rooms also support an owner-managed protected mode. When enabled, editing is limited to the repository owner plus the invited editor list stored in the room Durable Object.
 
+Empty repository rooms also get a one-time decorative starter layout on first websocket join. Existing rooms with user data are left unchanged.
+
 If you change `wrangler.toml` bindings, regenerate the Worker runtime declarations before typechecking:
 
 ```bash
@@ -245,6 +251,17 @@ curl -X POST \
   -H "Authorization: Bearer $ROOM_RESET_TOKEN" \
   https://<your-worker-url>/admin/rooms/pixel-game/reset
 ```
+
+To paint a single pixel over HTTP:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  https://<your-worker-url>/api/rooms/tolluset%2Fpxpx/pixels \
+  -d '{"x":0,"y":0,"color":"sky","playerName":"pxpx-bot"}'
+```
+
+The pixel API accepts palette ids such as `sky` or `rose`, plus custom colors like `#38bdf8`. Open rooms accept unauthenticated writes. Protected repository rooms require the same Worker GitHub session token used for websocket editing, sent as `Authorization: Bearer <token>` or `?github_auth=<token>`.
 
 ## SSH Gateway
 

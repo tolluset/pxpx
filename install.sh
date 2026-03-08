@@ -5,8 +5,7 @@ set -eu
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 INSTALL_DIR=${PIXEL_GAME_INSTALL_DIR:-}
 BIN_NAME=${PIXEL_GAME_BIN_NAME:-pxboard}
-# Set this when the public GitHub repository slug is fixed.
-DEFAULT_REPO=""
+DEFAULT_REPO="tolluset/pxpx"
 REPO=${PIXEL_GAME_REPO:-$DEFAULT_REPO}
 VERSION=${PIXEL_GAME_VERSION:-latest}
 FORCE_DOWNLOAD=0
@@ -24,7 +23,7 @@ Options:
   -h, --help                 Show this help message
 
 Environment variables:
-  PIXEL_GAME_REPO
+  PIXEL_GAME_REPO (default: tolluset/pxpx)
   PIXEL_GAME_VERSION
   PIXEL_GAME_INSTALL_DIR
   PIXEL_GAME_BIN_NAME

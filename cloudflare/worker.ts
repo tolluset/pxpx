@@ -8,8 +8,14 @@ import { FAVICON_SVG, getFaviconIcoBytes } from "./favicon";
 
 const DOC_STATE_KEY = "doc-state";
 const ROOM_ACCESS_POLICY_KEY = "room-access-policy";
+const ROOM_DECORATION_VERSION_KEY = "room-decoration-version";
 const INITIAL_BOARD_WIDTH = 16;
 const INITIAL_BOARD_HEIGHT = 16;
+const MAX_PAINT_LOG_ENTRIES = 200;
+const MAX_API_COORDINATE = 4095;
+const REPOSITORY_ROOM_DECORATION_VERSION = 2;
+const REPOSITORY_ROOM_DECORATION_BOARD_WIDTH = 40;
+const REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT = 24;
 const MESSAGE_SYNC = 0;
 const MESSAGE_AWARENESS = 1;
 const MESSAGE_ACCESS = 4;
@@ -17,12 +23,15 @@ const WEBSOCKET_READY_STATE_OPEN = 1;
 const ROOM_RESET_INTERNAL_PATH = "/__admin/reset";
 const ROOM_ACCESS_INTERNAL_PATH = "/__admin/access";
 const ROOM_ACCESS_EDITORS_INTERNAL_PATH = "/__admin/access/editors";
+const ROOM_PIXELS_INTERNAL_PATH = "/__api/pixels";
 const GITHUB_DEVICE_CODE_URL = "https://github.com/login/device/code";
 const GITHUB_ACCESS_TOKEN_URL = "https://github.com/login/oauth/access_token";
 const GITHUB_USER_URL = "https://api.github.com/user";
 const GITHUB_API_VERSION = "2022-11-28";
 const GITHUB_LOGIN_SCOPE = "read:user";
 const GITHUB_SESSION_TOKEN_TTL_MS = 1000 * 60 * 60 * 24 * 30;
+const PALETTE_COLOR_IDS = new Set(["rose", "amber", "lime", "emerald", "sky", "violet", "pink", "slate"]);
+const DECORATION_COLOR_IDS = ["rose", "amber", "lime", "emerald", "sky", "violet", "pink"];
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder();
@@ -138,6 +147,12 @@ type AwarenessUpdateEvent = {
   removed: number[];
 };
 
+type DecorationCell = {
+  x: number;
+  y: number;
+  color: string;
+};
+
 function getRoomName(pathname: string) {
   return decodeURIComponent(pathname.replace(/^\/+/, ""));
 }
@@ -173,6 +188,16 @@ function getRoomAccessEditorsPath(pathname: string) {
     roomName: readString(decodeURIComponent(match[1])),
     githubLogin: match[2] ? readString(decodeURIComponent(match[2])) : undefined,
   };
+}
+
+function getRoomPixelsPathRoomName(pathname: string) {
+  const match = pathname.match(/^\/api\/rooms\/(.+)\/pixels$/);
+
+  if (!match) {
+    return null;
+  }
+
+  return readString(decodeURIComponent(match[1]));
 }
 
 function isRecord(value: unknown): value is JsonRecord {
@@ -245,6 +270,10 @@ function readBearerToken(authorizationHeader: string | null) {
 
 function readNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) ? value : null;
+}
+
+function readInteger(value: unknown) {
+  return typeof value === "number" && Number.isInteger(value) ? value : null;
 }
 
 function readBoolean(value: unknown) {
@@ -449,6 +478,204 @@ function normalizeGithubSessionTokenPayload(value: unknown): GithubSessionTokenP
 
 function readOptionalString(value: unknown) {
   return typeof value === "string" ? value : null;
+}
+
+function normalizeHexColor(value: string | undefined) {
+  if (!value) {
+    return null;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return /^#[0-9a-f]{6}$/.test(normalized) ? normalized : null;
+}
+
+function normalizePixelColorValue(value: unknown) {
+  const raw = readString(value);
+
+  if (!raw) {
+    return null;
+  }
+
+  const normalizedPaletteId = raw.trim().toLowerCase();
+
+  if (PALETTE_COLOR_IDS.has(normalizedPaletteId)) {
+    return normalizedPaletteId;
+  }
+
+  return normalizeHexColor(raw);
+}
+
+function normalizePlayerName(value: unknown) {
+  const normalized = readString(value)?.trim();
+
+  if (!normalized) {
+    return null;
+  }
+
+  return normalized.slice(0, 40);
+}
+
+function createPaintLogEntry(options: {
+  x: number;
+  y: number;
+  colorId: string;
+  playerName: string;
+  githubLogin?: string;
+}) {
+  return {
+    id: `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    timestamp: new Date().toISOString(),
+    x: options.x,
+    y: options.y,
+    colorId: options.colorId,
+    playerName: options.playerName,
+    githubLogin: options.githubLogin,
+  };
+}
+
+function hashString(value: string) {
+  let hash = 2166136261;
+
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+
+  return hash >>> 0;
+}
+
+function pickDecorationColors(repositoryRoom: RepositoryRoom) {
+  const hash = hashString(repositoryRoom.repoSlug);
+  const colors: string[] = [];
+
+  for (let index = 0; colors.length < 3; index += 1) {
+    const color = DECORATION_COLOR_IDS[(hash + index * 3) % DECORATION_COLOR_IDS.length];
+
+    if (!colors.includes(color)) {
+      colors.push(color);
+    }
+  }
+
+  return {
+    primary: colors[0],
+    secondary: colors[1],
+    accent: colors[2],
+    neutral: "slate",
+  };
+}
+
+function pushDecorationCells(
+  cells: DecorationCell[],
+  originX: number,
+  originY: number,
+  points: Array<[number, number]>,
+  color: string,
+  options: { mirrorX?: boolean; mirrorY?: boolean } = {},
+) {
+  for (const [rawX, rawY] of points) {
+    cells.push({
+      x: options.mirrorX ? originX - rawX : originX + rawX,
+      y: options.mirrorY ? originY - rawY : originY + rawY,
+      color,
+    });
+  }
+}
+
+function createRepositoryDecorationCells(repositoryRoom: RepositoryRoom) {
+  const cells: DecorationCell[] = [];
+  const { primary, secondary, accent, neutral } = pickDecorationColors(repositoryRoom);
+  const hash = hashString(repositoryRoom.repoSlug);
+  const slashYOffset = hash % 3;
+  const sparkleOffset = hash % 5;
+  const cornerFramePoints: Array<[number, number]> = [
+    [0, 0],
+    [1, 0],
+    [2, 0],
+    [0, 1],
+    [0, 2],
+  ];
+  const cornerAccentPoints: Array<[number, number]> = [
+    [1, 1],
+    [2, 1],
+  ];
+  const slashPoints: Array<[number, number]> = [
+    [0, 3],
+    [1, 2],
+    [2, 1],
+    [3, 0],
+    [4, 1],
+    [5, 2],
+    [6, 3],
+    [7, 4],
+  ];
+  const shadowPoints: Array<[number, number]> = [
+    [0, 4],
+    [3, 1],
+    [6, 4],
+    [7, 5],
+  ];
+  const sparkles: Array<[number, number]> = [
+    [10 + sparkleOffset, 4],
+    [16, 2 + slashYOffset],
+    [24, 18 - slashYOffset],
+    [30 - sparkleOffset, 15],
+  ];
+
+  pushDecorationCells(cells, 2, 2, cornerFramePoints, primary);
+  pushDecorationCells(cells, 2, 2, cornerAccentPoints, accent);
+  pushDecorationCells(cells, REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3, 2, cornerFramePoints, secondary, {
+    mirrorX: true,
+  });
+  pushDecorationCells(cells, REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3, 2, cornerAccentPoints, accent, {
+    mirrorX: true,
+  });
+  pushDecorationCells(cells, 2, REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3, cornerFramePoints, secondary, {
+    mirrorY: true,
+  });
+  pushDecorationCells(cells, 2, REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3, cornerAccentPoints, accent, {
+    mirrorY: true,
+  });
+  pushDecorationCells(
+    cells,
+    REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3,
+    REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3,
+    cornerFramePoints,
+    primary,
+    {
+      mirrorX: true,
+      mirrorY: true,
+    },
+  );
+  pushDecorationCells(
+    cells,
+    REPOSITORY_ROOM_DECORATION_BOARD_WIDTH - 3,
+    REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT - 3,
+    cornerAccentPoints,
+    accent,
+    {
+      mirrorX: true,
+      mirrorY: true,
+    },
+  );
+  pushDecorationCells(cells, 16, 9 + slashYOffset, slashPoints, accent);
+  pushDecorationCells(cells, 16, 9 + slashYOffset, shadowPoints, neutral);
+
+  for (const [x, y] of sparkles) {
+    cells.push({
+      x,
+      y,
+      color: (x + y + hash) % 2 === 0 ? primary : secondary,
+    });
+  }
+
+  return cells.filter(
+    (cell, index, source) =>
+      cell.x >= 0 &&
+      cell.y >= 0 &&
+      cell.x < REPOSITORY_ROOM_DECORATION_BOARD_WIDTH &&
+      cell.y < REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT &&
+      source.findIndex((candidate) => candidate.x === cell.x && candidate.y === cell.y) === index,
+  );
 }
 
 function normalizeGithubUser(value: unknown): GithubUser | null {
@@ -888,7 +1115,7 @@ async function handleRoomReset(request: Request, env: DurableObjectEnv, roomName
   return jsonResponse(payload ?? { ok: true, roomName });
 }
 
-async function proxyRoomAdminRequest(request: Request, env: DurableObjectEnv, roomName: string, internalPath: string) {
+async function proxyRoomInternalRequest(request: Request, env: DurableObjectEnv, roomName: string, internalPath: string) {
   const id = env.ROOMS.idFromName(roomName);
   const stub = env.ROOMS.get(id);
   const internalUrl = new URL(`https://pixel-room${internalPath}`);
@@ -904,6 +1131,7 @@ export default {
     const roomResetName = getRoomResetPathRoomName(url.pathname);
     const roomAccessName = getRoomAccessPathRoomName(url.pathname);
     const roomAccessEditors = getRoomAccessEditorsPath(url.pathname);
+    const roomPixelsName = getRoomPixelsPathRoomName(url.pathname);
 
     if (url.pathname === "/favicon.svg") {
       return staticAssetResponse(FAVICON_SVG, "image/svg+xml; charset=utf-8");
@@ -942,7 +1170,7 @@ export default {
     }
 
     if (roomAccessName) {
-      return proxyRoomAdminRequest(request, env, roomAccessName, ROOM_ACCESS_INTERNAL_PATH);
+      return proxyRoomInternalRequest(request, env, roomAccessName, ROOM_ACCESS_INTERNAL_PATH);
     }
 
     if (roomAccessEditors?.roomName) {
@@ -950,12 +1178,16 @@ export default {
         ? `/${encodeURIComponent(roomAccessEditors.githubLogin)}`
         : "";
 
-      return proxyRoomAdminRequest(
+      return proxyRoomInternalRequest(
         request,
         env,
         roomAccessEditors.roomName,
         `${ROOM_ACCESS_EDITORS_INTERNAL_PATH}${editorSuffix}`,
       );
+    }
+
+    if (roomPixelsName) {
+      return proxyRoomInternalRequest(request, env, roomPixelsName, ROOM_PIXELS_INTERNAL_PATH);
     }
 
     const roomName = getRoomName(url.pathname);
@@ -975,6 +1207,7 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
   private readonly awareness = new awarenessProtocol.Awareness(this.doc);
   private readonly connections = new Map<WebSocket, ConnectionMeta>();
   private readonly ready: Promise<void>;
+  private decorationChecked = false;
 
   constructor(ctx: DurableObjectState, env: DurableObjectEnv) {
     super(ctx, env);
@@ -1013,11 +1246,17 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
       return this.handleRoomEditors(request, url);
     }
 
+    if (url.pathname === ROOM_PIXELS_INTERNAL_PATH) {
+      return this.handleRoomPixels(request, url);
+    }
+
     if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
       return new Response("Pixel room is ready.", { status: 200 });
     }
 
     const roomName = getRoomName(url.pathname);
+    await this.ready;
+    await this.ensureRepositoryRoomDecoration(roomName);
     const [client, server] = Object.values(new WebSocketPair());
     const connectionMeta = createConnectionMeta(await this.resolveConnectionAccess(request, roomName));
 
@@ -1025,7 +1264,6 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
     this.ctx.acceptWebSocket(server);
     server.serializeAttachment(connectionMeta);
 
-    await this.ready;
     this.sendInitialSync(server, connectionMeta);
 
     return new Response(null, {
@@ -1247,6 +1485,47 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
     });
   }
 
+  private async handleRoomPixels(request: Request, url: URL) {
+    await this.ready;
+
+    if (request.method !== "POST") {
+      return methodNotAllowed(["POST"]);
+    }
+
+    const roomName = readString(url.searchParams.get("room"));
+
+    if (!roomName) {
+      return errorResponse(400, "room is required.");
+    }
+
+    const access = await this.resolveConnectionAccess(request, roomName);
+
+    if (!access.canEdit) {
+      return errorResponse(403, access.deniedReason ?? "You do not have edit access for this room.");
+    }
+
+    const payload = await request.json().catch(() => null);
+
+    if (!isRecord(payload)) {
+      return errorResponse(400, "Request body must be a JSON object.");
+    }
+
+    const x = readInteger(payload.x);
+    const y = readInteger(payload.y);
+    const color = normalizePixelColorValue(payload.color);
+
+    if (x === null || y === null || x < 0 || y < 0 || x > MAX_API_COORDINATE || y > MAX_API_COORDINATE) {
+      return errorResponse(400, `x and y must be integers between 0 and ${MAX_API_COORDINATE}.`);
+    }
+
+    if (!color) {
+      return errorResponse(400, "color must be a palette id or #rrggbb hex value.");
+    }
+
+    const playerName = normalizePlayerName(payload.playerName) ?? access.githubLogin ?? "pxpx-http";
+    return jsonResponse(await this.paintPixel(roomName, x, y, color, playerName, access.githubLogin));
+  }
+
   private async requireRepositoryOwner(request: Request, repositoryRoom: RepositoryRoom) {
     const auth = await resolveGithubAuth(request, this.env);
 
@@ -1466,6 +1745,134 @@ export class PixelRoom extends DurableObject<DurableObjectEnv> {
 
   private async persistDocState() {
     await this.ctx.storage.put(DOC_STATE_KEY, Y.encodeStateAsUpdate(this.doc));
+  }
+
+  private async ensureRepositoryRoomDecoration(roomName: string) {
+    if (this.decorationChecked) {
+      return;
+    }
+
+    const repositoryRoom = parseRepositoryRoomName(roomName);
+
+    if (!repositoryRoom) {
+      this.decorationChecked = true;
+      return;
+    }
+
+    await this.ctx.blockConcurrencyWhile(async () => {
+      if (this.decorationChecked) {
+        return;
+      }
+
+      const storedVersion = readNumber(await this.ctx.storage.get<number>(ROOM_DECORATION_VERSION_KEY));
+
+      if (storedVersion === REPOSITORY_ROOM_DECORATION_VERSION) {
+        this.decorationChecked = true;
+        return;
+      }
+
+      const boardMap = this.doc.getMap<number>("board");
+      const pixelsMap = this.doc.getMap<string>("pixels");
+      const paintLogArray = this.doc.getArray<unknown>("paintLog");
+      const boardWidth = readNumber(boardMap.get("width")) ?? INITIAL_BOARD_WIDTH;
+      const boardHeight = readNumber(boardMap.get("height")) ?? INITIAL_BOARD_HEIGHT;
+      const hasUserState = pixelsMap.size > 0 || paintLogArray.length > 0 || boardWidth > INITIAL_BOARD_WIDTH || boardHeight > INITIAL_BOARD_HEIGHT;
+
+      if (hasUserState) {
+        await this.ctx.storage.put(ROOM_DECORATION_VERSION_KEY, REPOSITORY_ROOM_DECORATION_VERSION);
+        this.decorationChecked = true;
+        return;
+      }
+
+      const decorationCells = createRepositoryDecorationCells(repositoryRoom);
+
+      this.doc.transact(() => {
+        boardMap.set("width", REPOSITORY_ROOM_DECORATION_BOARD_WIDTH);
+        boardMap.set("height", REPOSITORY_ROOM_DECORATION_BOARD_HEIGHT);
+
+        for (const cell of decorationCells) {
+          pixelsMap.set(`${cell.x},${cell.y}`, cell.color);
+        }
+      });
+
+      await this.persistDocState();
+      await this.ctx.storage.put(ROOM_DECORATION_VERSION_KEY, REPOSITORY_ROOM_DECORATION_VERSION);
+      this.decorationChecked = true;
+    });
+  }
+
+  private async paintPixel(
+    roomName: string,
+    x: number,
+    y: number,
+    color: string,
+    playerName: string,
+    githubLogin?: string,
+  ) {
+    const boardMap = this.doc.getMap<number>("board");
+    const pixelsMap = this.doc.getMap<string>("pixels");
+    const paintLogArray = this.doc.getArray<unknown>("paintLog");
+    const cellKey = `${x},${y}`;
+    const previousColor = pixelsMap.get(cellKey);
+    const previousBoardWidth = readNumber(boardMap.get("width")) ?? INITIAL_BOARD_WIDTH;
+    const previousBoardHeight = readNumber(boardMap.get("height")) ?? INITIAL_BOARD_HEIGHT;
+    const nextBoardWidth = Math.max(previousBoardWidth, x + 1, INITIAL_BOARD_WIDTH);
+    const nextBoardHeight = Math.max(previousBoardHeight, y + 1, INITIAL_BOARD_HEIGHT);
+    const boardChanged = nextBoardWidth !== previousBoardWidth || nextBoardHeight !== previousBoardHeight;
+    const paintedAt = new Date().toISOString();
+    let action = previousColor === color ? "unchanged" : previousColor === undefined ? "painted" : "repainted";
+
+    if (action === "unchanged" && boardChanged) {
+      action = "resized";
+    }
+
+    if (action !== "unchanged" || boardChanged) {
+      const paintLogEntry = createPaintLogEntry({
+        x,
+        y,
+        colorId: color,
+        playerName,
+        githubLogin,
+      });
+
+      this.doc.transact(() => {
+        if (action !== "unchanged") {
+          pixelsMap.set(cellKey, color);
+          paintLogArray.push([paintLogEntry]);
+
+          if (paintLogArray.length > MAX_PAINT_LOG_ENTRIES) {
+            paintLogArray.delete(0, paintLogArray.length - MAX_PAINT_LOG_ENTRIES);
+          }
+        }
+
+        if (boardChanged) {
+          boardMap.set("width", nextBoardWidth);
+          boardMap.set("height", nextBoardHeight);
+        }
+      });
+
+      await this.persistDocState();
+    }
+
+    return {
+      ok: true,
+      roomName,
+      action,
+      x,
+      y,
+      cellKey,
+      color,
+      previousColor: previousColor ?? null,
+      playerName,
+      githubLogin,
+      paintedAt,
+      boardSize: {
+        width: nextBoardWidth,
+        height: nextBoardHeight,
+      },
+      pixelCount: pixelsMap.size,
+      paintLogCount: paintLogArray.length,
+    };
   }
 
   private async resetRoomState(roomName?: string) {

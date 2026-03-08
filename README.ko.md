@@ -39,6 +39,8 @@ ssh pxpx.sh
 ssh -t pxpx.sh torvalds/linux
 ```
 
+`pxpx@` 같은 고정 SSH 사용자명은 필요 없습니다. 게이트웨이가 SSH 사용자명을 무시하므로 기본 진입점은 그냥 `ssh pxpx.sh` 입니다.
+
 ## Worker 기능 사용
 
 로컬 Worker 실행:

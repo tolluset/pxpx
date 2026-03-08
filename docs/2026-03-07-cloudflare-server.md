@@ -61,6 +61,8 @@ PIXEL_REPO=owner/repo pnpm dev:client
 
 Manual room selection continues to work with `--room` or `PIXEL_ROOM`. The Worker preserves slash-separated room names such as `owner/repo`.
 
+Empty repository rooms receive a one-time decorative starter layout on first websocket join. Repository rooms that already contain user data are left untouched.
+
 GitHub login uses the same Worker host by default:
 
 ```bash
@@ -75,6 +77,17 @@ curl -X POST \
   -H "Authorization: Bearer $ROOM_RESET_TOKEN" \
   https://<worker-url>/admin/rooms/pixel-game/reset
 ```
+
+Single-pixel HTTP writes are also available:
+
+```bash
+curl -X POST \
+  -H "Content-Type: application/json" \
+  https://<worker-url>/api/rooms/tolluset%2Fpxpx/pixels \
+  -d '{"x":0,"y":0,"color":"sky","playerName":"pxpx-bot"}'
+```
+
+The pixel-write route accepts palette ids or `#rrggbb` values. Open rooms can be written without extra auth. Protected repository rooms require the same Worker-issued GitHub session token used for websocket editing.
 
 Repository rooms also expose owner-only access policy routes:
 
