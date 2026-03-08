@@ -2,13 +2,13 @@
 
 Terminal-native collaborative pixel board built with OpenTUI, React, and Yjs. This repository is open source and self-host friendly: it includes the terminal client, a Cloudflare Worker collaboration server, and local build and release scripts.
 
-For a simpler Korean overview for presentations, see [README.ko.md](./README.ko.md).
+For a Korean-language overview, see [README.ko.md](./README.ko.md).
 
 ![Pixel Game terminal screenshot](./docs/assets/readme-terminal-screenshot.png)
 
 ## Try It First
 
-The fastest way to understand the project is to join the hosted board from a real terminal:
+If the public SSH entrypoint is available, the fastest way to try the project is from a real terminal:
 
 ```bash
 ssh pxpx.sh
@@ -16,13 +16,13 @@ ssh -t pxpx.sh facebook/react
 ssh -t pxpx.sh torvalds/linux
 ```
 
-`ssh pxpx.sh` is the product hook. You do not need a fixed SSH username such as `pxpx@`; the gateway accepts plain `ssh pxpx.sh` and ignores the presented SSH username. You can also jump straight into a repository-scoped room with any `owner/repo` slug, such as `torvalds/linux`. The rest of this README explains how to run and self-host the same stack from source.
+`ssh pxpx.sh` is the default public entrypoint when the SSH gateway is available. You do not need a fixed SSH username such as `pxpx@`; the gateway accepts plain `ssh pxpx.sh` and ignores the presented SSH username. You can also jump straight into a repository-scoped room with any `owner/repo` slug, such as `torvalds/linux`. The rest of this README explains how to run and self-host the same stack from source.
 
 ## Open-source Scope
 
 - Included and supported: terminal client, Cloudflare Worker, local build and release scripts
 - Included as an advanced deployment option: SSH gateway in `src/ssh-gateway.ts`
-- Not part of the open-source compatibility contract: any maintainer-run shared worker or SSH host
+- Out of scope for this repository: any maintainer-run shared worker or SSH host
 
 ## What It Supports
 

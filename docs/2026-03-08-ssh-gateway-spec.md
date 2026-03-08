@@ -102,7 +102,7 @@ ssh -t pxpx@131.186.25.184 facebook/react
 
 ### Why That Was Not Enough
 
-The product hook wanted:
+The desired public entrypoint was:
 
 ```bash
 ssh pxpx.sh
